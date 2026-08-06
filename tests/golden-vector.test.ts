@@ -70,4 +70,31 @@ describe("calculateHourlyAverage", () => {
       ),
     ).toStrictEqual(expected);
   });
+
+  it("returns null for averageFreeBikes if nothing covers the hour", () => {
+    const maxStaleness = 900;
+    const intervalStart = new Date("2026-08-05T14:00:00Z");
+    const intervalEnd = new Date("2026-08-05T15:00:00Z");
+
+    const observations: Observation[] = [
+      // Observation that expired long before the target hour starts
+      { timestamp: new Date("2026-08-05T10:00:00Z"), freeBikes: 50 },
+    ];
+
+    const expected = {
+      coveredSeconds: 0,
+      averageFreeBikes: null,
+      coverage: 0,
+      partial: true,
+    };
+
+    expect(
+      calculateHourlyAverage(
+        observations,
+        intervalStart,
+        intervalEnd,
+        maxStaleness,
+      ),
+    ).toStrictEqual(expected);
+  });
 });

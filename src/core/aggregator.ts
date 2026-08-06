@@ -5,7 +5,7 @@ export interface Observation {
 
 export interface HourlyResult {
   coveredSeconds: number;
-  averageFreeBikes: number;
+  averageFreeBikes: number | null;
   coverage: number;
   partial: boolean;
 }
@@ -66,12 +66,12 @@ export function calculateHourlyAverage(
   }
 
   const averageFreeBikes =
-    coveredSeconds === 0 ? 0 : weightedBikes / coveredSeconds;
+    coveredSeconds === 0 ? null : weightedBikes / coveredSeconds;
   const coverage = coveredSeconds / SECONDS_PER_HOUR;
 
   return {
     coveredSeconds,
-    averageFreeBikes: round(averageFreeBikes, 2),
+    averageFreeBikes: averageFreeBikes === null ? null : round(averageFreeBikes, 2),
     coverage: round(coverage, 4),
     partial: coverage < 0.75,
   };
