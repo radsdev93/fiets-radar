@@ -43,3 +43,20 @@ The aggregation engine will strictly enforce the `[t, t + maxStaleness)` validit
 
 **Consequences:**
 The Math Engine (Aggregator) must be designed to calculate intervals discretely rather than assuming a continuous timeline. It must explicitly calculate the start and end of every valid interval, clipping them at the `maxStaleness` boundary and the hour boundaries before calculating the integral.
+
+## Architectural Boundary: API Client and Runtime Validation
+
+**Context:**
+The system must consume data from an untrusted third-party HTTP API. The requirements strictly forbid blind type assertions (e.g., `as NetworkResponse`) and mandate runtime validation. Furthermore, the network logic must be isolated so that the scheduling and aggregation components can be tested deterministically without real network calls.
+
+**Decision:**
+I will implement a dedicated API Fetcher component that acts as the sole network boundary.
+
+1. **Strict Zod Parsing:** All responses from the CityBikes API will be immediately passed through strict Zod schemas.
+
+2. **Fail-Safe Returns:** If the API returns malformed JSON or unexpected shapes, the Zod parser will throw, and the Fetcher will catch the error, returning a safe, empty state (e.g., null or a tagged error type) to the Scheduler rather than crashing the node process.
+
+3. **Decoupled State:** The Fetcher will not maintain scheduling state; it will only execute targeted fetches and report the observed rate limit headers back to the caller.
+
+**Consequences:**
+The Math Engine and Scheduler remain completely pure and agnostic to HTTP or network errors. If the CityBikes API changes its data model unexpectedly, the system will degrade gracefully (recording 0 covered seconds for the affected window) rather than poisoning the storage with invalid types.
