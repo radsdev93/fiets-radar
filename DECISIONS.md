@@ -27,3 +27,19 @@ I am choosing to strictly enforce Requirement R6 (the budget limit) and intentio
 
 **Consequences:**
 The service will never get banned or cause a denial of service to the provider (satisfying the spirit of R6 being a "hard ceiling"). The adaptive scheduler will be forced to stretch the polling interval for some cities beyond 5 minutes to stay under the 25-request ceiling.
+
+## Underspecified Requirement: Expiration and "Uncovered Seconds" Gaps
+
+**Context:**
+The definition of "Hourly average" states that it is the integral of the value over the covered seconds, divided by the covered seconds, and that "uncovered seconds are excluded from both". However, it is underspecified how the system should handle the mathematical integral during a mid-hour gap where an observation's `maxStaleness` (900s) has expired, but a new observation has not yet arrived. It is ambiguous whether the system should carry forward the last known value or drop the gap entirely.
+
+**The Proof:**
+The provided Golden Test Vector proves that the data must be strictly dropped. 
+In the test vector, the 11:52:00 observation (100 bikes) expires at 12:07:00, and the next observation is at 12:10:00. This creates a 180-second gap. A second gap of 1200 seconds occurs between 12:30:00 and 12:50:00. 
+If we carry forward the stale values during these blackouts, the covered seconds exceed 2220 and the average skews heavily. The only way to achieve exactly 2220 covered seconds and an average of 108.11 is to completely omit these expired intervals from the time-weighted sum.
+
+**Decision:**
+The aggregation engine will strictly enforce the `[t, t + maxStaleness)` validity window. Mid-hour gaps where data has expired will be treated as mathematical voids. The integral calculation will exclusively sum intervals where the timestamp is strictly within an active validity window.
+
+**Consequences:**
+The Math Engine (Aggregator) must be designed to calculate intervals discretely rather than assuming a continuous timeline. It must explicitly calculate the start and end of every valid interval, clipping them at the `maxStaleness` boundary and the hour boundaries before calculating the integral.
