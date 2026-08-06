@@ -9,3 +9,9 @@
 * **Assistant/Tool:** VSCode Codex Extension
 * **Model & Settings:** GPT-5.6 Terra (configured with High reasoning level)
 * **Estimated Share of Code Produced:** ~70% (boilerplate, tests, and modular utility logic), with architectural design, mathematical validation, and manual overrides performed entirely by hand.
+
+### Edge Case Verification: Pre-Hour Superseded Observations
+
+* **Scenario:** I designed an edge-case test in `tests/golden-vector.test.ts` where multiple observations occur before the hour start boundary, with earlier ones being superseded before `intervalStart`.
+* **Reasoning:** I wanted to verify that the AI's validity clipping logic (`Math.min` / `Math.max` bounds) did not accidentally leak superseded seconds or drop valid overlapping seconds across the hour boundary.
+* **Outcome:** The generated aggregator logic correctly calculated 0 seconds for the superseded observation and accurately clipped the active observation to the hour start without requiring modification.
