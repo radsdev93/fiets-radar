@@ -20,7 +20,7 @@ Requirement R5 mandates that every city must be observed at least once every 5-m
 Requirement R6 mandates that we must never exceed the provider's discovered request budget, treating it as a "hard ceiling."
 
 **The Proof:**
-Through runtime API inspection, the global request budget is strictly 300 requests/hour, which equates to exactly 25 requests every 5 minutes. However, the 20 required cities map to 28 distinct network endpoints. Fetching 28 networks in 5 minutes mathematically guarantees exceeding the budget of 25.
+Through runtime API inspection, the global request budget is strictly 300 requests/hour, which equates to exactly 25 requests every 5 minutes. However, the 20 required cities map to 34 distinct network endpoints. Fetching 34 networks in 5 minutes mathematically guarantees exceeding the budget of 25.
 
 **Decision:**
 I am choosing to strictly enforce Requirement R6 (the budget limit) and intentionally allow Requirement R5 (the 5-minute window) to degrade. 
