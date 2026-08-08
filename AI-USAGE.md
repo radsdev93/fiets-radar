@@ -16,7 +16,7 @@ It is updated during development rather than reconstructed at the end.
 
 - **Model & settings:** GPT-5.6 Sol, High reasoning
 - **Role:** External review and analysis assistant.
-- **Code contribution:** 0%.
+- **Code contribution:** <1%. One final TypeScript instance-type annotation was corrected from `Database` to `Database.Database` after switching to the maintained `@types/better-sqlite3` declarations; implementation code otherwise came from Codex or was written/reviewed by me.
 - **Usage:** Used to review documentation wording, cross-check reasoning against the assignment, and analyze captured CityBikes API evidence such as response bodies and headers. Findings were reviewed against the raw evidence before being incorporated into the repository.
 
 ## Method
@@ -181,13 +181,30 @@ The test now distinguishes:
 
 ---
 
+## Workable Assistant Suggestion Rejected
+
+### Local `better-sqlite3` Type Declaration
+
+During the SQLite persistence slice, Codex generated a small local ambient declaration file for `better-sqlite3`.
+
+The suggestion was workable in the narrow sense that the project compiled with it and all 120 tests passed. It was also understandable given that my implementation prompt explicitly prohibited adding dependencies.
+
+I rejected the local declaration during review. Maintaining a handwritten partial declaration would make the project responsible for describing a third-party library API that TypeScript would trust without checking against the package itself.
+
+I replaced it with the maintained `@types/better-sqlite3` development dependency.
+
+That replacement exposed a real typing difference: the database instance field needed to use the package's `Database.Database` instance type rather than `Database`. After that small correction, `npx tsc --noEmit` passed and the full 120-test suite remained green.
+
+This was not classified as an assistant failure because the original solution satisfied the prompt and worked. It was a deliberate maintainability/type-safety tradeoff made during review.
+
+---
+
 ## Remaining Required Entries
 
 The following sections will be completed only when genuine qualifying examples occur:
 
 * two additional assistant failures that type-check and look plausible;
 * a piece written manually because the assistant repeatedly failed to produce a satisfactory result;
-* a workable assistant suggestion that I deliberately rejected;
 * the part of the final repository I trust least and what evidence would increase confidence.
 
 I will not manufacture examples solely to fill these sections.
