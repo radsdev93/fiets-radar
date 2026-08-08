@@ -60,6 +60,23 @@ As the project expanded, prompts remained scoped to one boundary or coherent cha
 
 This made it easier to distinguish a correct implementation from scope creep. For example, the HTTP-client prompt prohibited retries, scheduling, bicycle normalization, persistence, and timing logic; those responsibilities remain separate modules.
 
+### Later RED/GREEN workflow adjustment
+
+As the deadline approached, I reduced assistant-call overhead for larger but still coherent modules. Instead of using separate assistant invocations for RED and GREEN, I required one prompt to perform the phases in order:
+
+1. create focused tests and only the minimum stubs needed to compile;
+2. run the full suite and report the actual failing RED state;
+3. implement the minimum production behavior;
+4. rerun the full suite for GREEN;
+5. run type checking and diff checks;
+6. stop without staging or committing so I could review the complete result.
+
+For the city configuration and network normalizer slice, the reported RED state was 81 tests total with 62 passing and 19 failing; after implementation the same suite was 81/81 green.
+
+This workflow is still test-first, but the RED and GREEN executions happen inside one assistant invocation rather than as separate Git commits. I do not reconstruct artificial failing commits after the implementation already exists. Earlier repository history retains several separate RED/GREEN commits, while later coherent modules commit their tests together with the implementation.
+
+The tradeoff is that I cannot review the generated test file between the assistant's RED execution and its implementation. I mitigate that by deciding the behavioral contract before prompting, requiring the assistant to report both phases, and reviewing the tests and implementation together before committing.
+
 ### Design storage
 
 Specification interpretations and architectural choices are recorded in `DECISIONS.md`.
