@@ -178,7 +178,31 @@ The final capture contained 15,524 station timestamps plus 40,386 vehicle timest
 2026-08-07T04:11:31.603538+00:00Z
 ```
 
-This is observed CityBikes V2 behavior across the final evidence set. The provider boundary must not assume that a strict standard ISO parser accepts it. Parsing and normalization behavior still needs an actual Node 24 runtime test before an implementation claim is made.
+This is observed CityBikes V2 behavior across the final evidence set.
+
+### Node 24 timestamp-parser characterization
+
+A follow-up characterization was run with the project's pinned Node.js `24.14.1` runtime before implementing the timestamp parser.
+
+Native `Date.parse` / `Date` behavior was:
+
+| Input | Observed Node 24 behavior |
+| --- | --- |
+| `2026-08-07T04:11:31.603538+00:00Z` | rejected as an invalid date |
+| `2026-08-07T04:11:31.603538Z` | accepted as `2026-08-07T04:11:31.603Z` |
+| `2026-08-07T04:11:31.603538+00:00` | accepted as `2026-08-07T04:11:31.603Z` |
+| `2026-08-07T04:11:31Z` | accepted as `2026-08-07T04:11:31.000Z` |
+| `2026-08-07T04:11:31` | accepted as local time rather than explicit UTC |
+| `2026-02-30T04:11:31Z` | normalized to `2026-03-02T04:11:31.000Z` rather than rejected |
+
+This characterization demonstrates two provider-boundary risks:
+
+- the captured CityBikes `+00:00Z` form cannot be passed directly to the native Node 24 date parser;
+- native date parsing is not sufficient calendar validation because some impossible dates are normalized instead of rejected.
+
+JavaScript `Date` stores millisecond precision, so fractional digits beyond the first three are intentionally lost when a higher-precision provider timestamp is represented as a `Date`.
+
+These findings characterize the runtime only. They do not, by themselves, claim that the project timestamp parser has been implemented.
 
 Approximate ages of the newest provider data in this snapshot were:
 
