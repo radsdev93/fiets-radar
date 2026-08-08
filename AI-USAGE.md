@@ -77,6 +77,8 @@ This workflow is still test-first, but the RED and GREEN executions happen insid
 
 The tradeoff is that I cannot review the generated test file between the assistant's RED execution and its implementation. I mitigate that by deciding the behavioral contract before prompting, requiring the assistant to report both phases, and reviewing the tests and implementation together before committing.
 
+The scheduler slice is an example of why I keep the reported execution history rather than reconstructing a cleaner story afterward. The first scheduler RED run contained 153 tests total: 141 existing tests passed and 12 new scheduler tests failed. The assistant's first final GREEN report contained 154 passing tests because one additional scheduler test (`invalid-rate-limit` fail-closed behavior) had been added after that initial RED run. I did not recreate an artificial 13-test RED state. Later human review added genuine focused regressions from the then-green scheduler: 154→158 tests produced 4 RED failures, and a final deadline-pacing review produced a genuine 158→160 test RED with 2 failures. The final scheduler checkpoint is 160/160 green.
+
 ### Design storage
 
 Specification interpretations and architectural choices are recorded in `DECISIONS.md`.
@@ -242,6 +244,88 @@ After the fix, it verifies:
 
 The regression produced a genuine RED state of 141 tests total, 140 passing and 1 failing, followed by 141/141 GREEN.
 
+
+### 3. Scheduler Treated Provider-Stale Data as New/Useful State
+
+#### What it produced
+
+The first adaptive scheduler implementation assumed that a successful normalization result was useful for current scheduling.
+
+Two consequences looked plausible in isolation:
+
+1. if no previous usable snapshot existed, a successfully normalized response was classified as `freshness-refresh`;
+2. if `freeBikes` differed from the cached value, it was classified as `availability-change`.
+
+The code type-checked and the initial scheduler suite reached 154/154 passing tests.
+
+#### How I noticed
+
+During review I followed the provider timestamps rather than the HTTP completion time.
+
+The network normalizer deliberately allows historical intervals to normalize successfully for persistence/replay. A response fetched at 12:20 could therefore normalize to a provider-backed interval ending at 12:15. That is valid historical data, but it is not usable current state and should not count as a freshness refresh.
+
+I also checked the existing storage rule that a later HTTP fetch can contain **older provider state** than a still-usable cached snapshot. The initial scheduler compared the changed bike count before proving that the provider state was not older. A response containing an older provider timestamp and a different count could therefore be reported as a new availability change and cause more aggressive polling.
+
+Both mistakes conflated:
+
+```text
+successful HTTP / normalization
+```
+
+with:
+
+```text
+new provider-backed information usable now
+```
+
+#### What I replaced it with
+
+Successful normalized snapshots are still persisted as historical evidence.
+
+Before classifying one as useful for current scheduling, the scheduler now requires:
+
+```text
+validFrom <= fetchedAt < validUntil
+```
+
+An already-expired normalized interval is classified as `failure`.
+
+If a currently usable normalized response has a `validFrom` earlier than the previous usable provider state, it is classified as `redundant` even when the numeric bike count differs.
+
+Only non-regressing provider state can produce a new availability-change classification.
+
+#### Evidence that the replacement is better
+
+Human review added four focused scheduler regressions from the 154-test green baseline.
+
+The resulting genuine RED state was:
+
+```text
+158 total
+154 passed
+4 failed
+```
+
+The failures included:
+
+- already-expired normalized provider state being treated as useful;
+- older provider state with a changed count being treated as an availability change;
+- two cases where capacity pacing was overridden by expiry-safety deadlines.
+
+After the focused corrections the suite reached 158/158 green.
+
+A later review found that a near-expiry snapshot could still pull an actual deadline earlier than a known sustainable floor even when global `capacityInsufficient` was false. Two more test-first regressions produced:
+
+```text
+160 total
+158 passed
+2 failed
+```
+
+The shared deadline helper now ensures expiry protection cannot make the scheduler intentionally poll earlier than the known runtime sustainable pacing floor. The final scheduler checkpoint is 160/160 green.
+
+The provider-staleness classification issue is the AI failure recorded here. The pacing corrections are related scheduler review corrections, but I do not count them as separate assistant failures merely to increase the failure count.
+
 ---
 
 ## Workable Assistant Suggestion Rejected
@@ -262,12 +346,36 @@ This was not classified as an assistant failure because the original solution sa
 
 ---
 
+## Least-Trusted Final Area So Far
+
+The part I currently trust least is the **adaptive scheduler policy**, not because a specific known failing case remains, but because it is the most heuristic component and has the largest gap between deterministic unit tests and real provider behavior.
+
+The core safety boundaries around it are stronger:
+
+- request authorization is persisted before the HTTP request;
+- runtime provider remaining values are authoritative;
+- malformed budget state fails closed;
+- provider snapshots retain explicit validity;
+- the scheduler is globally single-request-in-flight.
+
+By contrast, choices such as halving cadence after availability changes, keeping cadence after freshness-only refreshes, doubling after redundancy, using a 60-second expiry margin, and deriving a sustainable per-network floor are deliberately simple heuristics.
+
+The evidence that would increase my confidence most is the required deterministic replay benchmark over a **real recorded CityBikes trace**, using the same request budget for both the adaptive policy and a dumb fixed-interval baseline. I specifically want to see:
+
+- total requests;
+- redundant-fetch ratio;
+- mean and p95 staleness;
+- rolling R5 compliance;
+- fairness/no-starvation behavior;
+- MAE against the trace-derived ground truth;
+- behavior when runtime capacity becomes insufficient.
+
+If the adaptive policy loses badly on those measurements, I would tune the heuristic rather than treating the current passing unit tests as proof that the policy is good.
+
 ## Remaining Required Entries
 
-The following sections will be completed only when genuine qualifying examples occur:
+The following required section will be completed only if a genuine qualifying example occurs:
 
-* one additional assistant failure that type-checks and looks plausible;
-* a piece written manually because the assistant repeatedly failed to produce a satisfactory result;
-* the part of the final repository I trust least and what evidence would increase confidence.
+* a piece written manually because the assistant repeatedly failed to produce a satisfactory result.
 
 I will not manufacture examples solely to fill these sections.
