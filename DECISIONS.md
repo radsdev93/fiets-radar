@@ -32,7 +32,7 @@ The current stack is:
 - TypeScript 6.x;
 - Jest with `ts-jest`;
 - Zod for runtime boundary validation;
-- `better-sqlite3` as the intended local storage implementation.
+- `better-sqlite3` as the local storage implementation.
 
 TypeScript 6.x was selected because the installed `ts-jest` version declared compatibility with TypeScript versions below 7. Forcing npm to ignore the peer-dependency range would create an unsupported dependency combination without providing a benefit required by the assignment.
 
@@ -40,15 +40,52 @@ Zod will validate untrusted CityBikes responses before they enter the internal d
 
 SQLite was chosen because it requires no external service and supports transactions in a single local file.
 
+The implemented store persists three kinds of durable state:
+
+- normalized network snapshots;
+- complete city observations used as aggregation inputs;
+- hourly aggregation results.
+
+Dates are stored as Unix epoch milliseconds and reconstructed as `Date` values on read.
+
+For file-backed databases the store configures:
+
+```text
+journal_mode = WAL
+synchronous = FULL
+```
+
+Network snapshots are historical rather than "latest row wins". Exact duplicate snapshots are idempotent, and lookup at an injected `asOf` instant requires both causality and provider validity:
+
+```text
+fetchedAt <= asOf
+validFrom <= asOf < validUntil
+```
+
+When several snapshots are usable, selection prefers:
+
+```text
+validFrom DESC
+fetchedAt DESC
+```
+
+This deliberately prefers fresher provider-backed state over a merely later HTTP fetch.
+
+Official city observations use `(city, countryCode, observedAt)` as their idempotent identity. Incomplete diagnostic subtotals are not persisted through the official-observation API.
+
+Hourly results use `(city, countryCode, hourStart)` as their identity and are upserted so an in-flight hour can be recomputed from persisted observations without duplicating logical output. `averageFreeBikes = null` is preserved as SQL `NULL` and round-trips as `null`.
+
 ### Consequences and cost
 
-Selecting `better-sqlite3` does not, by itself, satisfy the hard-kill recovery requirement. R7 will only be considered satisfied after the project defines and tests:
+The storage strategy favors recomputing derived hourly state from durable observation inputs instead of maintaining a fragile partially accumulated weighted sum.
 
-- transaction boundaries;
-- SQLite journal and synchronization settings;
-- idempotent observation and aggregate writes;
-- restart behavior for an in-flight hour;
-- a real kill-and-restart recovery scenario.
+Normal close/reopen recovery has been tested with a real temporary SQLite file and a new `SqliteStore` instance. That test verifies that normalized network state, city observations, and hourly results survive reopening, and that persisted city observations can reproduce the expected aggregate.
+
+This does **not** yet prove the hard-kill requirement. R7 will only be considered satisfied after an actual process-level kill-and-restart scenario demonstrates that:
+
+- completed hours remain intact;
+- the in-flight hour can be recomputed from durable observations;
+- replay/restart does not duplicate covered seconds or observations.
 
 The synchronous SQLite API is acceptable for the expected workload, but database operations must remain small and deliberate so they do not unnecessarily block the event loop.
 

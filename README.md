@@ -25,7 +25,10 @@ The completed service will collect validated availability observations, schedule
 - source-time validity intervals that do not refresh stale provider state from HTTP fetch time;
 - deterministic Bay Wheels filtering for the San Francisco slice;
 - causal complete/incomplete city composition from cached network snapshots;
-- interval-aware hourly aggregation with explicit per-observation expiry while preserving the original Golden Vector API.
+- interval-aware hourly aggregation with explicit per-observation expiry while preserving the original Golden Vector API;
+- SQLite persistence for normalized network snapshots, complete city observations, and hourly results;
+- idempotent persistence and normal close/reopen recovery using file-backed SQLite;
+- provider-valid cached network selection that prefers source freshness over HTTP fetch recency.
 
 ### Provider reconnaissance and semantic analysis completed
 
@@ -38,7 +41,7 @@ The completed service will collect validated availability observations, schedule
 ### Not yet implemented
 
 - scheduler and budget controller;
-- persistence and recovery;
+- hard-kill (`SIGKILL`) recovery proof;
 - trace recording, replay, and benchmarking;
 - CLI or HTTP result exposure.
 
@@ -54,7 +57,7 @@ Central scheduler + global budget
 Fetch outcomes and observed state feed back into the scheduler.
 ```
 
-The core provider-to-domain path is implemented through complete city observations: CityBikes responses are validated, normalized according to reproducible network configuration, and composed only from snapshots that were already fetched and remain provider-valid at the composition instant. Hourly aggregation now accepts explicit validity intervals so composed observations can expire earlier than a fresh `maxStaleness` window without inventing coverage. Request-budget control, adaptive scheduling, persistence/recovery, deterministic replay/benchmarking, and result exposure are not yet implemented.
+The core provider-to-storage path is implemented through hourly results: CityBikes responses are validated, normalized according to reproducible network configuration, composed only from snapshots that were already fetched and remain provider-valid at the composition instant, aggregated over explicit validity intervals, and persisted in SQLite. Network snapshots are retained historically so a later HTTP fetch with older provider state does not destroy a still-usable cached snapshot. Normal close/reopen recovery is tested. Request-budget control, adaptive scheduling, actual hard-kill recovery proof, deterministic replay/benchmarking, and result exposure are not yet implemented.
 
 ## Development Requirements
 
