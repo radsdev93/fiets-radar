@@ -1,6 +1,9 @@
 import type { z } from "zod";
 
-import type { RateLimitState } from "./rate-limit-headers";
+import {
+  parseRateLimitHeaders,
+  type RateLimitState,
+} from "./rate-limit-headers";
 import { cityBikesResponseSchema } from "./schemas";
 
 export type FetchLike = (
@@ -46,7 +49,68 @@ export type CityBikesFetchResult =
 
 export async function fetchCityBikesNetwork(
   networkId: string,
-  _fetchImpl: FetchLike,
+  fetchImpl: FetchLike,
 ): Promise<CityBikesFetchResult> {
-  throw new Error("Not implemented");
+  const url = new URL(
+    `https://api.citybik.es/v2/networks/${encodeURIComponent(networkId)}`,
+  );
+  url.searchParams.set("fields", "stations,vehicles");
+
+  let response: Response;
+
+  try {
+    response = await fetchImpl(url.toString());
+  } catch (error) {
+    return { kind: "network-error", networkId, error };
+  }
+
+  const rateLimit = parseRateLimitHeaders(response.headers);
+
+  if (!response.ok) {
+    return {
+      kind: "http-error",
+      networkId,
+      status: response.status,
+      rateLimit,
+    };
+  }
+
+  if (rateLimit === null) {
+    return {
+      kind: "invalid-rate-limit",
+      networkId,
+      status: response.status,
+    };
+  }
+
+  let decoded: unknown;
+
+  try {
+    decoded = await response.json();
+  } catch {
+    return {
+      kind: "malformed-json",
+      networkId,
+      status: response.status,
+      rateLimit,
+    };
+  }
+
+  const validation = cityBikesResponseSchema.safeParse(decoded);
+
+  if (!validation.success) {
+    return {
+      kind: "invalid-response",
+      networkId,
+      status: response.status,
+      rateLimit,
+    };
+  }
+
+  return {
+    kind: "success",
+    networkId,
+    payload: validation.data,
+    rateLimit,
+  };
 }
