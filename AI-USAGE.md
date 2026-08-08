@@ -15,9 +15,9 @@ It is updated during development rather than reconstructed at the end.
 ### ChatGPT
 
 - **Model & settings:** GPT-5.6 Sol, High reasoning
-- **Role:** External analysis and documentation assistant.
+- **Role:** External review and analysis assistant.
 - **Code contribution:** 0%.
-- **Usage:** Used to analyze captured CityBikes API evidence, cross-check reasoning against the assignment, and help draft and refine project documentation. Provider claims were verified against the raw captured evidence before being incorporated into the repository.
+- **Usage:** Used to review documentation wording, cross-check reasoning against the assignment, and analyze captured CityBikes API evidence such as response bodies and headers. Findings were reviewed against the raw evidence before being incorporated into the repository.
 
 ## Method
 
@@ -34,6 +34,15 @@ After the initial implementation, I used review-driven edge-case tests:
 
 This is therefore not strict TDD for every committed line. It is test-first development for specified behavior, followed by adversarial review and regression testing.
 
+The same pattern was later applied to provider-boundary work. Timestamp parsing, Zod response validation, rate-limit parsing, and the HTTP client were developed as small behavioral slices. For several slices I committed an intentionally failing contract before the implementation that made it green.
+
+I also reviewed the tests themselves before treating a RED contract as complete. Two examples were:
+
+- the response-schema contract was strengthened to accept an unknown non-empty vehicle `kind`, preventing a plausible implementation from hard-coding only the currently observed `bike`, `ebike`, and `scooter` values at the structural validation layer;
+- the HTTP-client contract was strengthened so an HTTP 200 response with unusable rate-limit metadata and malformed JSON must return `invalid-rate-limit`, proving that budget validation takes precedence over body decoding.
+
+These were review refinements, not assistant failures: the implementation had not yet been written. The purpose was to make the behavioral contract precise enough that a later green implementation could not pass while violating an architectural decision.
+
 ### Prompting strategy
 
 I used narrow, task-focused prompts instead of asking the assistant to generate the complete service.
@@ -47,7 +56,9 @@ For the aggregation module, I intentionally omitted unrelated concerns such as:
 
 This kept the function independent and made its output directly testable.
 
-As the project expands, prompts are intended to remain scoped to one boundary or coherent change at a time.
+As the project expanded, prompts remained scoped to one boundary or coherent change at a time. Later prompts explicitly listed concerns that were out of scope, required existing tests to remain unchanged during the GREEN step, and asked the assistant to report test/type-check/diff results before I committed the change.
+
+This made it easier to distinguish a correct implementation from scope creep. For example, the HTTP-client prompt prohibited retries, scheduling, bicycle normalization, persistence, and timing logic; those responsibilities remain separate modules.
 
 ### Design storage
 
@@ -57,11 +68,11 @@ Measured provider behavior is recorded separately in `docs/api-findings.md`.
 
 Implementation prompts are based on those documents rather than asking the assistant to make undocumented product or architecture decisions.
 
-### Use of external analysis and documentation support
+### Use of external review
 
-I also used ChatGPT for evidence analysis and documentation support. I did not use it to generate implementation code.
+I also used ChatGPT as a second-pass reviewer for documentation and for exploratory analysis of the captured API evidence. I did not use it to generate implementation code.
 
-For provider behavior, AI analysis was treated as a way to identify patterns and questions to verify, not as evidence itself. Claims recorded in `docs/api-findings.md` are based on the captured response files.
+For provider behavior, the assistant's analysis was treated as a way to identify questions and patterns to verify, not as a source of truth. Claims recorded in `docs/api-findings.md` are based on the captured response files themselves.
 
 ---
 
@@ -100,7 +111,7 @@ For an hour with zero covered seconds, the initial implementation generated:
 ```ts
 const averageFreeBikes =
   coveredSeconds === 0 ? 0 : weightedBikes / coveredSeconds;
-```
+````
 
 The code compiled, passed the original golden-vector test, and looked locally reasonable.
 
