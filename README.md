@@ -228,7 +228,9 @@ Composition never grants a fresh full 900-second window to older component data.
 
 R5 is interpreted as a rolling five-minute requirement, not clock-aligned `00/05/10/...` buckets.
 
-The scheduler targets a complete city observation every 240 seconds, leaving headroom before the 300-second threshold. Actual compliance is measured by the benchmark rather than inferred from the target.
+The scheduler targets a complete city observation every 240 seconds, leaving headroom before the 300-second threshold. A city-level observation may be materialized at `asOf` from component measurements fetched earlier only while every required component remains causally available and provider-valid at `asOf`; local recomposition never extends a component's expiry.
+
+Actual R5 compliance is measured by the benchmark rather than inferred from the target or from provider request frequency.
 
 ### “Nothing new” is semantic
 
@@ -240,6 +242,8 @@ A fetch can be:
 - a failure.
 
 An unchanged bike count with meaningfully newer provider timestamps is useful freshness information. A later HTTP fetch carrying the same old provider state is not.
+
+The strict literal reading of R2 (“never spend a request on data that has not changed”) cannot be guaranteed together with R1's runtime-driven adaptation on a pull-only API: before probing, the scheduler cannot know whether a previously flat resource is still flat or has changed. The implemented resolution is to minimize, learn from, and report redundant fetches rather than claim they can be eliminated with certainty. The proof and cost are recorded in [`DECISIONS.md`](./DECISIONS.md).
 
 ## Crash Recovery
 
@@ -268,7 +272,7 @@ The duplicate observation is ignored by the idempotent observation key, so the r
 - A restart automatically finalizes the immediately preceding completed hour. A persistent finalization cursor for arbitrary multi-hour downtime is not implemented.
 - The first request needed to discover an unknown runtime budget is an unavoidable bootstrap edge. After discovery, request authorization is fail-closed.
 - The adaptive heuristic is intentionally simple and remains the least-trusted policy area until the final real-trace benchmark is complete.
-- The final specification-conflict proof and final benchmark result are documented separately and are still being completed at the time of this revision.
+- The required specification conflict is resolved in `DECISIONS.md` as R1 versus the strict literal reading of R2. The final benchmark result is still being collected at the time of this revision.
 
 ## Documentation
 

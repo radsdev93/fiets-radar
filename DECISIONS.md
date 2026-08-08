@@ -4,6 +4,8 @@ This document records specification conflicts, material ambiguities, architectur
 
 > **Revision note — August 7, 2026:** Additional provider reconnaissance changed the city-resource and composition model. In particular, the earlier request arithmetic relied on a complete-refresh assumption that is no longer the chosen model. Captured facts, external/operator research, and architectural decisions are now distinguished more explicitly. Earlier revisions remain visible in Git history.
 
+> **Revision note — August 8, 2026:** The required impossible-pair analysis is now resolved as R1 versus the strict literal reading of R2. The R5 city-observation interpretation is also made explicit: a city-level observation may be materialized at `asOf` from component measurements that were fetched earlier but remain provider-valid at `asOf`; doing so never renews the component validity intervals.
+
 ## Technical Stack and Scaffolding
 
 ### Context
@@ -116,7 +118,7 @@ The August 5 capture reported an hourly limit of 300 requests. Broad discovery f
 
 The earlier calculation of `34 endpoints × 12 windows = 408 requests/hour` was useful under an interpretation requiring every mapped network to be freshly fetched for every city observation. It no longer proves impossibility because the selected composition model permits still-valid cached network measurements to participate in a city state.
 
-R6 remains a hard invariant. The earlier proof must not be replaced with another unverified proof, and it also must not be read as proving that R5 and R6 are compatible. The challenge guarantees that at least one impossible requirement pair exists; the final proven pair remains open and must be established before submission.
+R6 remains a hard invariant. The earlier proof must not be replaced with another unverified proof, and it also must not be read as proving that R5 and R6 are compatible. The assignment's required impossible pair is resolved separately below as **R1 versus the strict literal reading of R2**; this R5/R6 reassessment is kept because it records an earlier assumption that was corrected openly.
 
 ### Consequences
 
@@ -188,7 +190,7 @@ A further availability tradeoff exists around bootstrap crashes. If the process 
 
 This policy gives R6 a clear operational meaning after discovery and prevents retries or normal polling from proceeding on guessed budget state. Its cost is availability: a malformed bootstrap response or transport failure can leave the controller fail-closed. When no trustworthy reset boundary is known, automatic polling remains blocked rather than risking an unprovable retry.
 
-The bootstrap ambiguity is recorded as an underspecified operational edge of R6. It is **not** being claimed as the assignment's required impossible requirement pair; that proof remains open.
+The bootstrap ambiguity is recorded as an underspecified operational edge of R6. It is **not** the assignment's required impossible requirement pair; the required pair is documented below under Decision 5.
 
 ---
 
@@ -460,24 +462,129 @@ This model can reduce coverage when one component is close to expiry. The benchm
 
 ---
 
-## Decision 5: R2 “Nothing New”
+## Decision 5: R1 Runtime Adaptation vs Literal R2 “Nothing New”
 
-### Decision
+### Context
 
-Classify fetches conceptually as follows:
+The assignment states every R1–R9 item as a hard requirement.
+
+R1 requires the service to poll adaptively: a network whose availability changes quickly must be
+polled more often than one that is flat or stale, and the adaptation must be driven by what is
+observed at runtime.
+
+R2 says:
+
+```text
+Do not spend requests on data that has not changed.
+```
+
+and also requires the service to report what fraction of fetches returned nothing new.
+
+The observed CityBikes interface is pull-based. The provider evidence captured for this project did
+not establish a push channel, `ETag`, `Last-Modified`, or another verified mechanism that tells the
+service, before a fetch, whether the remote state has changed.
+
+### Required impossible pair: R1 + strict literal R2
+
+Read strictly as **“never issue a request whose result turns out to contain no new data”**, R2
+cannot be guaranteed at the same time as runtime-driven R1.
+
+The proof is an indistinguishability argument.
+
+Assume the service last observed network state `S` at `t0`. At some later candidate poll instant
+`t1`, consider two possible provider worlds:
+
+```text
+World A: the provider still contains S
+World B: the provider has changed to S'
+```
+
+Before issuing the request at `t1`, the service has the same local information in both worlds.
+
+If it sends the request:
+
+```text
+World A → the request returns nothing new
+          → strict literal R2 is violated
+```
+
+If the scheduler never probes again in order to avoid that risk:
+
+```text
+World B → the service never discovers the change
+          → it can never make later polling react to that runtime change as R1 requires
+```
+
+Postponing the probe does not remove the contradiction. At the first future probe the scheduler
+chooses to make, the same two worlds are still indistinguishable immediately before that request:
+one world is unchanged and the other has changed.
+
+No scheduler policy can choose differently between those worlds before obtaining some new
+information, because the worlds are locally indistinguishable at that point.
+
+The real API evidence matters here: no verified free change-notification or conditional-validation
+mechanism was found that removes this uncertainty without consuming the provider request being
+accounted for.
+
+The second sentence of R2 also supports this interpretation of the conflict: the brief explicitly
+asks for the fraction of fetches that returned nothing new. If the first sentence literally implied
+that such a fetch could never occur, that metric would be forced to zero by construction.
+
+### Resolution
+
+Keep R1 as an actual runtime-adaptation requirement.
+
+Interpret R2 operationally as:
+
+> **minimize requests that return no semantically useful new information, learn from those outcomes,
+> and report their fraction honestly; do not claim that zero redundant fetches can be guaranteed.**
+
+A provider fetch is classified as exactly one of:
 
 1. **Availability change:** normalized bicycle availability changed.
 2. **Freshness refresh:** availability stayed the same, but provider-backed usable freshness advanced.
-3. **Redundant:** no useful semantic improvement—availability did not change, provider-backed validity did not advance, and network/city completeness did not improve.
-4. **Failure:** an HTTP, network, malformed, or invalid provider response; failures are not redundant.
+3. **Redundant:** no useful semantic improvement—availability did not change, provider-backed
+   validity did not advance, and network/city completeness did not improve.
+4. **Failure:** an HTTP, network, malformed, invalid, or otherwise unusable provider result.
 
-Raw-body hash equality and same numeric bike counts are not the definition. A same-count measurement with a newer source state may be useful, and restoring a previously unavailable or stale component is useful even if its count matches an older value.
+Raw-body equality and same numeric bike counts are not the definition of redundancy.
 
-### Consequences
+For example:
 
-Availability changes are a volatility signal and may shorten polling. Repeated freshness-only refreshes indicate a healthy but flat source. Repeated redundant responses indicate polling faster than useful source updates and should drive stronger backoff, while fairness prevents permanent starvation.
+```text
+100 bikes @ provider source 12:00
+100 bikes @ provider source 12:05
+```
 
-No verified push mechanism or cache validator lets the scheduler know in advance that a request will be unchanged. R2 therefore means adaptively minimizing redundant fetches and reporting the redundant ratio honestly, not claiming zero redundancy or clairvoyance. The required benchmark denominator remains total fetches, with failures reported separately so a low redundant ratio cannot conceal a high error rate.
+is useful new evidence even though the numerical count is unchanged, because provider-backed
+freshness advanced.
+
+By contrast:
+
+```text
+100 bikes @ provider source June 19
+100 bikes @ provider source June 19
+```
+
+fetched repeatedly in August is not a freshness refresh merely because HTTP receipt time advanced.
+
+### Cost
+
+The scheduler cannot guarantee a `0%` redundant-fetch ratio.
+
+Some probing is the unavoidable price of discovering whether a previously flat or stale resource
+has become volatile again. A redundant result is therefore not hidden as a success: it is measured,
+feeds adaptive backoff, and remains visible in the benchmark.
+
+Failures are tracked separately rather than counted as redundant, so a low redundancy ratio cannot
+conceal a high error rate.
+
+Availability changes may shorten polling. Freshness-only refreshes describe a healthy but relatively
+flat source. Repeated redundant responses drive stronger backoff, while fairness prevents permanent
+starvation.
+
+This resolution weakens the strict literal wording of R2, but it preserves the part that is
+implementable and measurable while making the unavoidable information-theoretic cost explicit.
 
 ---
 
@@ -520,25 +627,90 @@ No per-city or per-network timers are used. Production orchestration can call `s
 
 R5 is interpreted as a **rolling** five-minute requirement, not aligned `00/05/10/...` clock buckets.
 
-A fixed-bucket interpretation can satisfy adjacent buckets with observations near opposite edges while leaving an almost ten-minute gap. The scheduler instead targets:
+A fixed-bucket interpretation can satisfy adjacent buckets with observations near opposite edges
+while leaving an almost ten-minute gap. For example, observations at `12:00:01` and `12:09:59`
+would satisfy the aligned `12:00–12:05` and `12:05–12:10` buckets while leaving a gap of almost ten
+minutes between observations.
+
+The scheduler therefore targets:
 
 ```text
 CITY_OBSERVATION_TARGET_SECONDS = 240
 R5_WINDOW_SECONDS = 300
 ```
 
-A complete city observation is due every 240 seconds. A city is reported overdue after more than 300 seconds without a run-local complete observation.
+A complete city observation is due every 240 seconds. A city is reported overdue after more than
+300 seconds without a run-local complete observation.
 
-A city observation does not itself consume provider budget. If every required component network has a snapshot satisfying:
+### What counts as a city observation for R5
+
+The provider does not expose one atomic resource for every required city. A city observation is a
+derived city-level measurement produced by the composition boundary.
+
+The chosen interpretation is:
+
+> A new city observation may be materialized at composition instant `asOf` from component
+> measurements fetched earlier, **provided every required component still describes its component at
+> `asOf` under the provider-backed validity rules**.
+
+The required conditions are:
 
 ```text
-fetchedAt <= asOf
-validFrom <= asOf < validUntil
+component.fetchedAt <= asOf
+component.validFrom <= asOf < component.validUntil
 ```
 
-the city can be composed and persisted at `asOf` without another HTTP request.
+If they all hold, the composer may persist:
 
-Incomplete compositions never become official city observations.
+```text
+observedAt = asOf
+freeBikes  = sum(required component freeBikes)
+validUntil = minimum(required component validUntil)
+```
+
+This is considered an observation at `asOf` because it is the service's derived measurement of the
+city total at that instant, using evidence that is still valid at that instant.
+
+This interpretation does **not** claim that CityBikes itself was freshly contacted at `asOf`, and it
+does not renew any component:
+
+```text
+cached component validUntil stays unchanged
+city validUntil = earliest component validUntil
+```
+
+A component that has expired cannot be made current by local recomposition.
+
+### Why not require a fresh upstream fetch for every R5 observation?
+
+The brief defines R5 in terms of a city **observation**, not an upstream **request**. It separately
+defines validity so that an observation continues to describe the measured state until expiry.
+
+Requiring fresh HTTP evidence inside every R5 window would therefore add a stronger request-frequency
+rule that is not stated explicitly and would conflate two different questions:
+
+```text
+Do I currently have a valid city-level view?
+How recently did I contact the provider?
+```
+
+The first is what this implementation uses for R5. The second remains observable through source
+staleness and request metrics.
+
+### Cost of this interpretation
+
+R5 compliance can remain high even when no new provider request occurred in a particular
+five-minute window, as long as every component used for the new city-level observation remains
+provider-valid.
+
+That makes R5 a measure of **regular availability of a valid complete city view**, not a measure of
+upstream polling frequency.
+
+This is an explicit interpretation choice, not a claim that the brief uniquely forces this reading.
+The alternative “fresh upstream measurement in every R5 window” interpretation would produce
+different request arithmetic and could reduce achievable compliance under the same R6 budget.
+
+Incomplete compositions never become official city observations and therefore never satisfy R5.
 
 ### Network selection and fairness
 
@@ -872,20 +1044,79 @@ The adaptive heuristic is still judged by measurement, not intent. Final wins an
 
 ---
 
-## Specification Conflict Still Requiring Final Resolution
+## Final Specification-Problem Summary
 
-The original complete-refresh arithmetic was explicitly withdrawn because provider-valid cached measurements can participate in a later causal city composition. That correction should remain visible rather than being replaced with another convenient proof.
+The assignment explicitly requires at least one impossible pair and at least one material
+underspecification to be identified, proved, resolved, and priced.
 
-One semantic point still needs an explicit final position before submission: whether R5's phrase “an observation of that city falls inside that window” permits a new city observation to be materialized at `asOf` entirely from component measurements fetched earlier but still valid at `asOf`.
+### Impossible pair
 
-The current implementation says yes, while **never extending the underlying component expiry**. This is consistent with the binding rule that a non-expired observation describes the city throughout its validity interval, but it is stronger than merely checking whether some old observation remains valid.
+The required pair is:
 
-If the required R5 observation instead means a newly refreshed upstream measurement in every five-minute window, the 30-resource mapping changes the R5/R6 arithmetic materially. That interpretation must not be silently substituted after the fact.
+```text
+R1 runtime-driven adaptive polling
++
+strict literal R2 zero requests that return nothing new
+```
 
-The final `DECISIONS.md` must state the chosen reading, its proof, and its cost. This item is intentionally left open in this pre-benchmark revision rather than manufacturing a conflict.
+Decision 5 gives the proof.
+
+The core issue is information: before polling a pull-only resource, the service cannot distinguish
+“still unchanged” from “changed since the last observation” when the provider offers no verified
+free pre-request change signal.
+
+The resolution is to preserve runtime-driven adaptation and interpret R2 as minimizing, learning
+from, and reporting semantically redundant fetches rather than pretending they can be eliminated
+with certainty.
+
+The cost is that the redundant-fetch ratio is not guaranteed to be zero.
+
+### Material underspecification
+
+Decision 4 records the primary materially underspecified requirement.
+
+The binding aggregation definition assumes a city observation at one instant `t`, but real
+CityBikes city totals can require:
+
+```text
+many station/vehicle source timestamps
++
+sequential network fetches
++
+a later city composition instant
+```
+
+The brief does not define which of those times becomes `t`.
+
+Different readings change:
+
+- observation instant;
+- expiry;
+- R5 compliance;
+- covered seconds;
+- stored hourly averages.
+
+The chosen resolution is causal composition at `asOf`, with every component required to be known
+and provider-valid at `asOf`, and with city expiry capped at the earliest component expiry.
+
+The cost is conservative coverage and additional explicit-validity handling.
+
+### Additional explicit ambiguities
+
+Two other specification edges are documented but are not needed to satisfy the brief's minimum
+“one pair + one underspecification” requirement:
+
+- **R6 bootstrap authorization:** the first runtime budget headers cannot be read until after a
+  request has already been made. The implementation allows one durable bootstrap reservation and
+  fails closed afterward if trustworthy metadata is unavailable.
+- **R5 window and observation semantics:** the implementation uses rolling windows and treats a
+  causal recomposition from still-valid component evidence as a new city-level observation at
+  `asOf`, without renewing the component validity.
+
+These interpretations are stated here so the implementation does not silently rely on them.
 
 ## Remaining Open Questions
 
 - Final measured adaptive-versus-fixed benchmark result.
-- Final explicit impossible-pair proof/interpretation required by the brief.
-- A production policy for small future provider timestamps / clock skew beyond the current causal-validity checks.
+- A production policy for small future provider timestamps / clock skew beyond the current
+  causal-validity checks.
