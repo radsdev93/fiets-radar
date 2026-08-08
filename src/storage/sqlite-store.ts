@@ -25,6 +25,12 @@ export type PersistedRequestBudgetState =
     }
   | { kind: "fail-closed"; resetAt: Date | null };
 
+export interface StoredHourlyResult extends HourlyResult {
+  city: string;
+  countryCode: string;
+  hourStart: Date;
+}
+
 interface NetworkSnapshotRow {
   network_id: string;
   free_bikes: number;
@@ -46,6 +52,12 @@ interface HourlyResultRow {
   average_free_bikes: number | null;
   coverage: number;
   partial: number;
+}
+
+interface StoredHourlyResultRow extends HourlyResultRow {
+  city: string;
+  country_code: string;
+  hour_start: number;
 }
 
 interface RequestBudgetStateRow {
@@ -379,6 +391,33 @@ export class SqliteStore {
       coverage: row.coverage,
       partial: row.partial !== 0,
     };
+  }
+
+  listHourlyResults(): StoredHourlyResult[] {
+    const rows = this.database
+      .prepare<unknown[], StoredHourlyResultRow>(`
+        SELECT
+          city,
+          country_code,
+          hour_start,
+          covered_seconds,
+          average_free_bikes,
+          coverage,
+          partial
+        FROM hourly_results
+        ORDER BY hour_start ASC, city ASC, country_code ASC
+      `)
+      .all();
+
+    return rows.map((row) => ({
+      city: row.city,
+      countryCode: row.country_code,
+      hourStart: new Date(row.hour_start),
+      coveredSeconds: row.covered_seconds,
+      averageFreeBikes: row.average_free_bikes,
+      coverage: row.coverage,
+      partial: row.partial !== 0,
+    }));
   }
 
   getRequestBudgetState(): PersistedRequestBudgetState {

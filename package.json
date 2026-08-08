@@ -10,7 +10,9 @@
   "scripts": {
     "test": "jest",
     "trace:record": "npx tsc --outDir dist && node dist/src/cli/trace-record.js",
-    "benchmark": "npx tsc --outDir dist && node dist/src/cli/benchmark.js"
+    "benchmark": "npx tsc --outDir dist && node dist/src/cli/benchmark.js",
+    "service": "npx tsc --outDir dist && node dist/src/cli/service.js",
+    "results": "npx tsc --outDir dist && node dist/src/cli/results.js"
   },
   "keywords": [],
   "author": "",
