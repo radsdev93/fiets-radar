@@ -87,7 +87,7 @@ Implementation prompts are based on those documents rather than asking the assis
 
 ### Use of external review
 
-I also used ChatGPT as a second-pass reviewer for documentation and for exploratory analysis of the captured API evidence. I did not use it to generate implementation code.
+I also used ChatGPT as a second-pass reviewer for documentation, architectural reasoning, and exploratory analysis of the captured API evidence. It was not used as the primary implementation generator. One later TypeScript instance-type annotation was changed from `Database` to `Database.Database` following its review after the switch to maintained `better-sqlite3` typings.
 
 For provider behavior, the assistant's analysis was treated as a way to identify questions and patterns to verify, not as a source of truth. Claims recorded in `docs/api-findings.md` are based on the captured response files themselves.
 
@@ -128,7 +128,7 @@ For an hour with zero covered seconds, the initial implementation generated:
 ```ts
 const averageFreeBikes =
   coveredSeconds === 0 ? 0 : weightedBikes / coveredSeconds;
-````
+```
 
 The code compiled, passed the original golden-vector test, and looked locally reasonable.
 
@@ -179,6 +179,69 @@ The test now distinguishes:
 * `0`: a measured state with no free bikes;
 * `null`: no valid data from which an average can be calculated.
 
+### 2. Malformed Persisted Budget State Failed Open
+
+#### What it produced
+
+The initial persistent request-budget implementation decoded a missing row and an unrecognized or internally inconsistent row through the same fallback:
+
+```ts
+return { kind: "unknown" };
+```
+
+The code type-checked and all 140 tests passed.
+
+That looked plausible because `unknown` was also the legitimate state for a fresh database.
+
+#### How I noticed
+
+During review of the R6 hard invariant, I followed the fallback into the controller.
+
+`unknown` is not a blocked state: it authorizes exactly one bootstrap request.
+
+Therefore a persisted row such as an `established` state with a missing `remaining` value would be interpreted as fresh/unknown state and could authorize another provider request.
+
+That is fail-open behavior in the component whose purpose is to fail closed when request-budget state cannot be trusted.
+
+#### What I replaced it with
+
+I kept **absence of a row** as the legitimate `unknown` state.
+
+If a row exists but cannot be safely decoded as `unknown`, `bootstrap-pending`, `established`, or `fail-closed`, it now becomes:
+
+```ts
+{
+  kind: "fail-closed",
+  resetAt
+}
+```
+
+A valid persisted reset boundary is preserved when available; otherwise `resetAt` is `null`.
+
+The established state is also checked for a positive safe-integer limit, a safe-integer remaining count, `0 <= remaining <= limit`, and a valid reset timestamp.
+
+#### Evidence that the replacement is better
+
+I added a hostile regression test that creates the SQLite schema normally, then uses `better-sqlite3` directly in the test to insert an intentionally inconsistent persisted row:
+
+```text
+state_kind      = established
+limit_value     = 300
+remaining_value = NULL
+reset_at        = 13:00
+```
+
+Before the fix, the test observed `{ kind: "unknown" }` and failed.
+
+After the fix, it verifies:
+
+- the row is interpreted as `fail-closed`;
+- the known reset is preserved;
+- requests before the reset are blocked as `budget-unknown`;
+- exactly one new bootstrap may be reserved at the reset boundary.
+
+The regression produced a genuine RED state of 141 tests total, 140 passing and 1 failing, followed by 141/141 GREEN.
+
 ---
 
 ## Workable Assistant Suggestion Rejected
@@ -203,7 +266,7 @@ This was not classified as an assistant failure because the original solution sa
 
 The following sections will be completed only when genuine qualifying examples occur:
 
-* two additional assistant failures that type-check and look plausible;
+* one additional assistant failure that type-checks and looks plausible;
 * a piece written manually because the assistant repeatedly failed to produce a satisfactory result;
 * the part of the final repository I trust least and what evidence would increase confidence.
 
