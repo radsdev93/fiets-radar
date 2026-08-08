@@ -10,14 +10,14 @@ It is updated during development rather than reconstructed at the end.
 
 - **Model & settings:** GPT-5.6 Terra, High reasoning
 - **Role:** Primary implementation assistant.
-- **Code contribution:** Produced the initial versions of tests and implementation code described throughout this document. The final approximate percentage will be calculated before submission.
+- **Code contribution:** Roughly 99% of the committed TypeScript/Jest implementation was initially generated through Codex prompts and then reviewed before commit.
 
 ### ChatGPT
 
 - **Model & settings:** GPT-5.6 Sol, High reasoning
 - **Role:** External review and analysis assistant.
 - **Code contribution:** <1%. One final TypeScript instance-type annotation was corrected from `Database` to `Database.Database` after switching to the maintained `@types/better-sqlite3` declarations; implementation code otherwise came from Codex or was written/reviewed by me.
-- **Usage:** Used to review documentation wording, cross-check reasoning against the assignment, and analyze captured CityBikes API evidence such as response bodies and headers. Findings were reviewed against the raw evidence before being incorporated into the repository.
+- **Usage:** Used as an external second-pass analysis/review assistant for specification interpretation, documentation, captured API evidence, scheduler review, and benchmark-design review. Provider claims were checked against captured evidence before being incorporated into the repository.
 
 ## Method
 
@@ -77,7 +77,48 @@ This workflow is still test-first, but the RED and GREEN executions happen insid
 
 The tradeoff is that I cannot review the generated test file between the assistant's RED execution and its implementation. I mitigate that by deciding the behavioral contract before prompting, requiring the assistant to report both phases, and reviewing the tests and implementation together before committing.
 
-The scheduler slice is an example of why I keep the reported execution history rather than reconstructing a cleaner story afterward. The first scheduler RED run contained 153 tests total: 141 existing tests passed and 12 new scheduler tests failed. The assistant's first final GREEN report contained 154 passing tests because one additional scheduler test (`invalid-rate-limit` fail-closed behavior) had been added after that initial RED run. I did not recreate an artificial 13-test RED state. Later human review added genuine focused regressions from the then-green scheduler: 154→158 tests produced 4 RED failures, and a final deadline-pacing review produced a genuine 158→160 test RED with 2 failures. The final scheduler checkpoint is 160/160 green.
+The scheduler slice is an example of why I keep the reported execution history rather than reconstructing a cleaner story afterward. The first scheduler RED run contained 153 tests total: 141 existing tests passed and 12 new scheduler tests failed. The assistant's first final GREEN report contained 154 passing tests because one additional scheduler test (`invalid-rate-limit` fail-closed behavior) had been added after that initial RED run. I did not recreate an artificial 13-test RED state. Later second-pass review added genuine focused regressions from the then-green scheduler: 154→158 tests produced 4 RED failures, and a final deadline-pacing review produced a genuine 158→160 test RED with 2 failures. The final scheduler checkpoint is 160/160 green.
+
+
+### Trace, benchmark, and recovery workflow
+
+The trace/benchmark phase produced an important correction to my own prompting process.
+
+My first benchmark prompt asked for a compact normalized trace because I was optimizing for deterministic replay and file size. Codex implemented that design successfully, but a later reread of section 5 showed that the assignment explicitly requires the recorded fetch instant, HTTP status, headers, and body. The implementation was therefore replaced with a V2 raw trace instead of treating prompt compliance as specification compliance.
+
+That phase also exposed several cases where passing tests were not enough to trust the experimental design:
+
+- the first replay made a complete round visible from `roundAt`, which could expose a response captured later in the sequential sweep;
+- benchmark evaluation initially allowed the scheduler to consume a newly available trace checkpoint before scoring against that same checkpoint;
+- the first MAE compared instantaneous bike counts, while the brief requires stored hourly averages against trace ground truth;
+- staleness was initially sampled at trace-only events as well as regular evaluation ticks;
+- the first R5 metric measured time after observations rather than the share of complete rolling five-minute windows containing an observation.
+
+I treated these as benchmark-design corrections, not all as separate Codex failures. Several arose because my prompt itself encoded the wrong or incomplete interpretation. The fix was to go back to the brief, define the benchmark semantics precisely, add focused regression tests, and keep the measured RED/GREEN transitions.
+
+The relevant later checkpoints were:
+
+```text
+compact trace/replay slice:
+  RED   168 total / 160 passed / 8 failed
+  GREEN 168 / 168
+
+causality correction:
+  RED   171 total / 167 passed / 4 failed
+  GREEN 171 / 171
+
+metric correction:
+  RED   174 total / 171 passed / 3 failed
+  GREEN 174 / 174
+
+runtime / SIGKILL / results slice:
+  RED   179 total / 174 passed / 5 failed
+  GREEN 179 / 179
+```
+
+The V2 replay feeds recorded raw responses back through the real CityBikes client and Zod boundary instead of typing recorded JSON through an assertion.
+
+For R7, the generated test uses a real child process and file-backed SQLite database. It waits for an IPC `READY` signal, sends `SIGKILL` only to the exact child it spawned, restarts a second process against the same database, intentionally replays one duplicate observation, and verifies the final aggregate and persisted observation count. There are no real network calls or timer sleeps in that test.
 
 ### Design storage
 
@@ -296,7 +337,7 @@ Only non-regressing provider state can produce a new availability-change classif
 
 #### Evidence that the replacement is better
 
-Human review added four focused scheduler regressions from the 154-test green baseline.
+Second-pass review added four focused scheduler regressions from the 154-test green baseline.
 
 The resulting genuine RED state was:
 
@@ -360,22 +401,22 @@ The core safety boundaries around it are stronger:
 
 By contrast, choices such as halving cadence after availability changes, keeping cadence after freshness-only refreshes, doubling after redundancy, using a 60-second expiry margin, and deriving a sustainable per-network floor are deliberately simple heuristics.
 
-The evidence that would increase my confidence most is the required deterministic replay benchmark over a **real recorded CityBikes trace**, using the same request budget for both the adaptive policy and a dumb fixed-interval baseline. I specifically want to see:
+The benchmark harness now exists and reuses the real scheduler under the same explicit virtual request budget as a fixed-interval mode. A dense V2 raw trace is being captured while this revision is written.
+
+The evidence that will change my confidence is the final measured comparison:
 
 - total requests;
 - redundant-fetch ratio;
-- mean and p95 staleness;
+- mean and p95 provider-source staleness;
 - rolling R5 compliance;
-- fairness/no-starvation behavior;
-- MAE against the trace-derived ground truth;
-- behavior when runtime capacity becomes insufficient.
+- MAE of stored hourly averages against trace-derived ground truth.
 
-If the adaptive policy loses badly on those measurements, I would tune the heuristic rather than treating the current passing unit tests as proof that the policy is good.
+If the adaptive policy loses materially on those measurements, I will report the loss and tune only from that recorded evidence rather than treating the passing unit tests as proof that the heuristic is good.
 
-## Remaining Required Entries
+## Something Written by Hand
 
-The following required section will be completed only if a genuine qualifying example occurs:
+This required entry is intentionally still open in this revision.
 
-* a piece written manually because the assistant repeatedly failed to produce a satisfactory result.
+The benchmark subsystem is the strongest genuine candidate because multiple AI-assisted iterations produced plausible, type-correct implementations with incorrect experimental semantics. I will only claim a manually written piece after I have actually written that repository code myself and can explain why I stopped delegating that part.
 
-I will not manufacture examples solely to fill these sections.
+I will not relabel generated code as handwritten or invent a failure solely to fill the section.

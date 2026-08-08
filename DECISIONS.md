@@ -80,13 +80,25 @@ Hourly results use `(city, countryCode, hourStart)` as their identity and are up
 
 The storage strategy favors recomputing derived hourly state from durable observation inputs instead of maintaining a fragile partially accumulated weighted sum.
 
-Normal close/reopen recovery has been tested with a real temporary SQLite file and a new `SqliteStore` instance. That test verifies that normalized network state, city observations, and hourly results survive reopening, and that persisted city observations can reproduce the expected aggregate.
+Normal close/reopen recovery is tested with a real temporary SQLite file. R7 is now also covered by a real process-level SIGKILL/restart test against a file-backed SQLite database.
 
-This does **not** yet prove the hard-kill requirement. R7 will only be considered satisfied after an actual process-level kill-and-restart scenario demonstrates that:
+The recovery test deliberately waits for an explicit child-process `READY` signal after the relevant SQLite writes have completed, then sends `SIGKILL` only to that exact spawned child. A second process reopens the same database, deliberately replays one identical pre-kill observation, writes the remaining observations, and finalizes the formerly in-flight hour.
 
-- completed hours remain intact;
-- the in-flight hour can be recomputed from durable observations;
-- replay/restart does not duplicate covered seconds or observations.
+The verified results are:
+
+```text
+completed pre-kill hour:
+  coveredSeconds = 3600
+  averageFreeBikes = 16.67
+
+recovered in-flight hour:
+  coveredSeconds = 3600
+  averageFreeBikes = 23.33
+```
+
+Exactly three source observations remain for the recovered hour even though one pre-kill observation was intentionally replayed after restart. The `(city, countryCode, observedAt)` idempotency key prevents the replay from becoming a second logical observation.
+
+This proves the required recovery property for **committed** observations: already-committed coverage is neither lost nor applied twice. It does not claim that a SQLite write interrupted before it commits must appear after a crash.
 
 The synchronous SQLite API is acceptable for the expected workload, but database operations must remain small and deliberate so they do not unnecessarily block the event loop.
 
@@ -638,7 +650,7 @@ This prevents near-expiry/stale provider responses from creating immediate retry
 
 ### Source freshness correction
 
-Human review found two cases where the first scheduler implementation treated HTTP-success data too optimistically:
+Second-pass review found two cases where the first scheduler implementation treated HTTP-success data too optimistically:
 
 1. an already-expired normalized provider interval was counted as `freshness-refresh`;
 2. an older provider state with a different bike count was counted as `availability-change`.
@@ -661,11 +673,219 @@ Run-local adaptive interval state is not persisted across restart. Durable corre
 
 The policy can report `capacityInsufficient`, but it cannot make an impossible provider-capacity situation disappear. If runtime capacity is too low to refresh all necessary components before their provider-backed validity expires, R6 safety wins and actual R5 compliance may degrade. The benchmark must measure that result rather than infer compliance from the design.
 
-The current implementation is a policy engine, not yet the final infinite service loop. Runtime orchestration, trace recording, benchmark replay, and process-level recovery testing remain separate work.
+The policy is now wired into a minimal production runtime. `ServiceRuntime.tick()` finalizes completed UTC hours from durable city observations and then advances the centralized scheduler. The live CLI uses one central loop; it does not introduce timers per city or network.
+
+Raw trace recording and deterministic replay are also implemented. Final benchmark evidence is intentionally kept separate from the scheduler design: the heuristic is not considered successful merely because its unit tests pass.
 
 ---
 
+## Decision 7: Hour Finalization, SIGKILL Recovery, and Result Exposure
+
+### Context
+
+R7 requires a real hard-kill recovery story: completed hours must remain intact, and an in-flight hour must resume without double counting or losing seconds already accumulated.
+
+A tempting implementation is to persist mutable partial aggregation state such as:
+
+```text
+weightedSumSoFar
+coveredSecondsSoFar
+```
+
+That creates a replay problem after a crash: the service must know exactly which increments were already applied before continuing.
+
+R9 separately requires a way to expose stored hourly averages.
+
+### Options considered
+
+1. Persist a mutable partial weighted accumulator for the in-flight hour.
+2. Treat durable city observations as source facts and recompute the hour from those observations.
+3. Use an external stream processor or database with a larger recovery model.
+
+### Decision
+
+Choose option 2.
+
+Complete city observations are the durable aggregation inputs. Hourly results are derived/materialized state.
+
+When a UTC hour completes:
+
+```text
+load persisted observations overlapping the hour
+→ calculateHourlyAverageFromValidity(...)
+→ upsert hourly_results
+```
+
+No partially accumulated weighted sum is persisted.
+
+The production runtime has one coordinator. On each tick it finalizes completed UTC hours known within that process and then calls the centralized scheduler.
+
+For R9, `SqliteStore.listHourlyResults()` exposes deterministic domain records ordered by hour, city, and country. The `results` CLI prints them as JSON with ISO UTC timestamps and preserves `averageFreeBikes: null`.
+
+### Process-level proof
+
+The crash-recovery test uses a real child process and a real file-backed SQLite database.
+
+Before the kill, the child:
+
+- writes observations covering `10:00–11:00`;
+- finalizes that completed hour;
+- writes the first `11:00–11:10` observation;
+- signals `READY` only after those writes complete.
+
+The parent then calls `child.kill("SIGKILL")` on that exact child.
+
+The restart process:
+
+- opens the same SQLite file;
+- writes the identical `11:00–11:10` observation again;
+- writes `11:10–11:30` and `11:30–12:00`;
+- finalizes `11:00–12:00`.
+
+The recovered hour contains exactly three observations, not four, and evaluates to `3600` covered seconds and `23.33` average free bikes.
+
+### Consequences and cost
+
+The recovery model is simple because there is no partial arithmetic checkpoint to replay.
+
+The cost is recomputation: finalization reads the persisted observations for the hour again. At this assignment's scale that is deliberately preferred over a more complicated mutable checkpoint protocol.
+
+A fresh process automatically considers the immediately preceding completed hour. A persistent finalization cursor for arbitrary multi-hour downtime is not implemented, so automatic catch-up after a long outage is a documented limitation.
+
+---
+
+## Decision 8: Raw Trace, Causal Replay, and Benchmark Semantics
+
+### Context
+
+Section 5 requires real API evidence containing the instant, status, headers, and body of each fetch, then deterministic replay with a virtual clock and a same-budget comparison against a dumb fixed-interval baseline.
+
+The first benchmark implementation recorded only normalized semantic snapshots. That representation was compact and sufficient for scheduler semantics, but it did **not** satisfy the explicit raw-trace requirement. The benchmark design was therefore corrected rather than defended.
+
+A second issue was causality: one recorded round is a sequential sweep, so a response captured near the end of a round must not become visible merely because the round started earlier.
+
+The required MAE metric also compares **stored hourly averages**, not instantaneous free-bike counts.
+
+### Decision
+
+The submission benchmark format is V2 raw trace evidence.
+
+Each response records:
+
+```text
+networkId
+capturedAt
+HTTP status
+response headers
+exact response body text
+```
+
+The trace also records the selected city subset, configured network IDs, `maxStaleness`, and capture rounds. Trace JSON is runtime-validated with Zod before use.
+
+A complete round becomes replay-visible at:
+
+```text
+max(roundAt, every response.capturedAt)
+```
+
+not at `roundAt`.
+
+Replay rebuilds a synthetic HTTP `Response` and sends it through the real CityBikes client boundary. Recorded body data is therefore parsed as untrusted input again rather than asserted into an internal type.
+
+The benchmark runs the real `AdaptiveScheduler` twice:
+
+```text
+adaptive polling mode
+fixed polling mode
+```
+
+Both strategies receive the same trace, selected cities, virtual time range, and explicit simulated request budget.
+
+The fixed interval is derived from the experiment:
+
+```text
+ceil(networkCount * benchmarkDurationMs / requestBudget)
+```
+
+rather than from a hardcoded provider limit.
+
+### Metric definitions
+
+**Requests:** exact scheduler fetch attempts.
+
+**Staleness:** sampled on regular deterministic evaluation ticks only, using:
+
+```text
+virtualTime - city.oldestSourceAt
+```
+
+HTTP receipt time is not used as freshness.
+
+**p95 staleness:** nearest-rank percentile.
+
+**Redundant ratio:** scheduler semantic `redundantFetches / totalFetches`; failures remain separate.
+
+**R5 compliance:** continuous rolling-window compliance over complete five-minute windows contained inside the benchmark run. The possible window-ending domain is:
+
+```text
+[runStart + 300s, runEnd)
+```
+
+An observation at `t` satisfies window endings in:
+
+```text
+[t, t + 300s)
+```
+
+Intervals are clipped and unioned per city.
+
+**MAE:** mean absolute error between strategy **stored hourly averages** and trace-ground-truth hourly averages. Only completed UTC clock hours count, and only city-hour pairs where both sides have a non-null average are comparable.
+
+### Trace selection
+
+The final dense benchmark capture uses a handful of currently usable resources:
+
+```text
+Barcelona
+  ambici-amb
+  bicing
+
+Madrid
+  bicimad
+
+Göteborg
+  e-cargobike-goteborg
+  styr-staell-goeteborg
+```
+
+This subset provides both changing and comparatively flat availability behavior without allowing known provider-broken resources to dominate an experiment whose purpose is comparing scheduling policies.
+
+The earlier 30-resource/5-round normalized trace remains diagnostic evidence about provider behavior; it is not presented as the required section-5 raw trace.
+
+### Consequences and cost
+
+Raw traces are larger than normalized traces, but they satisfy the evidence requirement and allow replay to exercise the real runtime validation boundary.
+
+Round-level availability is conservative: the benchmark waits until the whole sweep is complete before making that complete round visible. This sacrifices some possible sample-level fidelity in exchange for a simple no-future-information rule.
+
+The adaptive heuristic is still judged by measurement, not intent. Final wins and losses remain pending until the running V2 capture completes and the comparison is executed.
+
+---
+
+## Specification Conflict Still Requiring Final Resolution
+
+The original complete-refresh arithmetic was explicitly withdrawn because provider-valid cached measurements can participate in a later causal city composition. That correction should remain visible rather than being replaced with another convenient proof.
+
+One semantic point still needs an explicit final position before submission: whether R5's phrase “an observation of that city falls inside that window” permits a new city observation to be materialized at `asOf` entirely from component measurements fetched earlier but still valid at `asOf`.
+
+The current implementation says yes, while **never extending the underlying component expiry**. This is consistent with the binding rule that a non-expired observation describes the city throughout its validity interval, but it is stronger than merely checking whether some old observation remains valid.
+
+If the required R5 observation instead means a newly refreshed upstream measurement in every five-minute window, the 30-resource mapping changes the R5/R6 arithmetic materially. That interpretation must not be silently substituted after the fact.
+
+The final `DECISIONS.md` must state the chosen reading, its proof, and its cost. This item is intentionally left open in this pre-benchmark revision rather than manufacturing a conflict.
+
 ## Remaining Open Questions
 
-- What small future-timestamp and clock-skew policy is appropriate?
-- Which final impossible requirement pair can be proven as required by the challenge?
+- Final measured adaptive-versus-fixed benchmark result.
+- Final explicit impossible-pair proof/interpretation required by the brief.
+- A production policy for small future provider timestamps / clock skew beyond the current causal-validity checks.

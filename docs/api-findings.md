@@ -247,3 +247,90 @@ Remaining unknown provider behavior includes:
 - exact `429` response behavior has not been intentionally triggered;
 - failed and retried request accounting has not been deliberately tested;
 - no cache validators were observed, but their absence in the captured sample is not proof that the provider can never emit them.
+
+## 9. August 8 All-Resource Diagnostic Trace
+
+**Date captured:** August 8, 2026  
+**Mode:** real CityBikes V2 capture through the project's client/normalization path  
+**Scope:** 30 configured network resources, 5 complete rounds
+
+The diagnostic run completed:
+
+```text
+complete rounds:   5
+incomplete rounds: 0
+provider requests: 150
+network resources: 30
+```
+
+This was a normalized V1 diagnostic trace created before the section-5 recorder was corrected to preserve raw HTTP status, headers, and bodies. It is therefore **not** the final benchmark trace handed in for section 5. Its purpose is provider-behavior evidence.
+
+Each round contained one normalized sample for every configured resource and no diagnostics.
+
+### Repeated stale-source evidence
+
+Six configured resources were already provider-expired at capture time in **every one of the five rounds**:
+
+```text
+callabike-berlin
+callabike-koln
+callabike-munchen
+docomo-cycle-kyoto
+spin-los-angeles
+valenbisi
+```
+
+A representative first-round `valenbisi` sample was:
+
+```json
+{
+  "networkId": "valenbisi",
+  "capturedAt": "2026-08-08T19:47:09.509Z",
+  "freeBikes": 2113,
+  "oldestSourceAt": "2026-06-19T09:35:47.174Z",
+  "newestSourceAt": "2026-06-19T09:35:47.842Z",
+  "validFrom": "2026-06-19T09:35:47.842Z",
+  "validUntil": "2026-06-19T09:50:47.174Z"
+}
+```
+
+A later round still reported the same provider state:
+
+```json
+{
+  "networkId": "valenbisi",
+  "capturedAt": "2026-08-08T19:56:56.578Z",
+  "freeBikes": 2113,
+  "oldestSourceAt": "2026-06-19T09:35:47.174Z",
+  "newestSourceAt": "2026-06-19T09:35:47.842Z",
+  "validFrom": "2026-06-19T09:35:47.842Z",
+  "validUntil": "2026-06-19T09:50:47.174Z"
+}
+```
+
+The HTTP retrieval occurred in August, but the source-backed validity interval still ended in June. Re-fetching therefore cannot be used to grant a fresh `maxStaleness` window.
+
+`spin-los-angeles` showed the same pattern with source state fixed around July 1 while captured again on August 8.
+
+### Healthy-resource contrast
+
+The same trace also contained provider-current resources. For example, the first `styr-staell-goeteborg` sample was captured at `19:47:20.829Z` with provider source timestamps around `19:46:22Z` and validity extending to `20:01:22Z`.
+
+The trace therefore demonstrates that stale-source behavior was not an artifact of the recorder assigning old timestamps to every network.
+
+### What this evidence supports
+
+The supported conclusions are:
+
+- successful HTTP receipt is not equivalent to current provider state;
+- provider source timestamps must drive freshness;
+- historical normalized snapshots can be useful diagnostic/persistence evidence even when they are unusable at fetch time;
+- repeatedly fetching a stale provider can produce no new usable state.
+
+The trace does **not** prove that those resources are permanently stale or that they will behave the same way on another day.
+
+### Relationship to the final benchmark trace
+
+Section 5 requires raw status, headers, and body for every recorded fetch. After this diagnostic run, the trace format was replaced with V2 raw recording and deterministic raw replay.
+
+The final benchmark capture is a separate dense V2 trace across Barcelona, Madrid, and Göteborg. It was still running when this documentation revision was prepared.
