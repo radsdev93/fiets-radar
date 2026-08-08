@@ -40,11 +40,12 @@ Zod will validate untrusted CityBikes responses before they enter the internal d
 
 SQLite was chosen because it requires no external service and supports transactions in a single local file.
 
-The implemented store persists three kinds of durable state:
+The implemented store persists four kinds of durable state:
 
 - normalized network snapshots;
 - complete city observations used as aggregation inputs;
-- hourly aggregation results.
+- hourly aggregation results;
+- the single global CityBikes request-budget state.
 
 Dates are stored as Unix epoch milliseconds and reconstructed as `Date` values on read.
 
@@ -125,11 +126,55 @@ Once that response is available:
 
 This is a conservative resolution, not a proof that the bootstrap request itself can never encounter an already-exhausted externally shared provider budget. No pre-request mechanism was established that can reveal the current remaining budget without consuming a request. The limitation must therefore be stated rather than hidden behind an assumed configured limit.
 
-The current rate-limit boundary parses the captured primary headers (`ratelimit-limit`, `ratelimit-remaining`, and `ratelimit-reset`) and checks the optional hourly compatibility headers for consistency. Request authorization and reset-time handling belong to the later global budget controller.
+The rate-limit boundary parses the captured primary headers (`ratelimit-limit`, `ratelimit-remaining`, and `ratelimit-reset`) and checks the optional hourly compatibility headers for consistency.
+
+### Persistent global budget controller
+
+Request authorization and reset-time handling are now implemented by a persistent global budget controller backed by the same SQLite store.
+
+The persisted state is conceptually one of:
+
+```text
+unknown
+bootstrap-pending
+established(limit, remaining, resetAt)
+fail-closed(resetAt | null)
+```
+
+The controller makes the following safety choices:
+
+- a fresh/unknown state may durably reserve exactly one bootstrap request;
+- the reservation is written synchronously before a permit is returned;
+- an established reservation decrements the persisted remaining count before the caller can perform the HTTP request;
+- provider-reported post-request `remaining` is authoritative and replaces the local conservative count exactly;
+- a reset does not refill from the previous `limit`; the new provider window is discovered through one new bootstrap request;
+- a request that yields no trustworthy budget metadata is never refunded;
+- fail-closed state with a known reset remains blocked until that reset, then permits one new bootstrap;
+- fail-closed state without a known reset remains blocked rather than guessing.
+
+The persisted budget row is also decoded fail-closed. Absence of a row means genuinely unknown/fresh state and may bootstrap. A row that exists but is malformed or internally inconsistent must not be converted to `unknown`, because `unknown` authorizes a bootstrap request. A hostile regression test writes an inconsistent `established` row directly through SQLite and verifies that it becomes `fail-closed` while preserving a valid reset boundary.
+
+### Single in-flight request assumption
+
+The budget reconciliation model deliberately assumes the centralized scheduler will keep at most **one CityBikes request in flight globally**:
+
+```text
+choose request
+→ reserve budget durably
+→ perform/await HTTP
+→ reconcile or fail closed
+→ only then choose another request
+```
+
+This keeps provider header reconciliation ordered and avoids requiring a collection of outstanding reservations.
+
+If future code allowed concurrent CityBikes requests, this controller would need explicit outstanding-reservation state or another ordering mechanism before the same R6 claim could be made.
+
+A further availability tradeoff exists around bootstrap crashes. If the process dies after a bootstrap permit has been durably reserved but before trustworthy rate-limit metadata is persisted, restart sees `bootstrap-pending` and must not silently issue another bootstrap request. When no reset boundary is known, automatic recovery cannot prove that a retry is safe, so the conservative state may remain blocked until an explicit recovery path is available. By contrast, a crash after an established reservation leaves the already-decremented known budget persisted, so continuing after restart remains conservative.
 
 ### Consequences and cost
 
-This policy gives R6 a clear operational meaning after discovery and prevents retries or normal polling from proceeding on guessed budget state. Its cost is availability: a malformed bootstrap response or transport failure can stop polling until a later explicit recovery path is defined.
+This policy gives R6 a clear operational meaning after discovery and prevents retries or normal polling from proceeding on guessed budget state. Its cost is availability: a malformed bootstrap response or transport failure can leave the controller fail-closed. When no trustworthy reset boundary is known, automatic polling remains blocked rather than risking an unprovable retry.
 
 The bootstrap ambiguity is recorded as an underspecified operational edge of R6. It is **not** being claimed as the assignment's required impossible requirement pair; that proof remains open.
 

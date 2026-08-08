@@ -28,7 +28,10 @@ The completed service will collect validated availability observations, schedule
 - interval-aware hourly aggregation with explicit per-observation expiry while preserving the original Golden Vector API;
 - SQLite persistence for normalized network snapshots, complete city observations, and hourly results;
 - idempotent persistence and normal close/reopen recovery using file-backed SQLite;
-- provider-valid cached network selection that prefers source freshness over HTTP fetch recency.
+- provider-valid cached network selection that prefers source freshness over HTTP fetch recency;
+- persistent global CityBikes request-budget controller with durable reservation-before-request accounting;
+- runtime budget reconciliation from provider-reported post-request `remaining` values;
+- conservative bootstrap, reset, exhaustion, and fail-closed handling, including hostile persisted-state validation.
 
 ### Provider reconnaissance and semantic analysis completed
 
@@ -40,7 +43,7 @@ The completed service will collect validated availability observations, schedule
 
 ### Not yet implemented
 
-- scheduler and budget controller;
+- adaptive centralized scheduler, fairness, and R5/R2 policy;
 - hard-kill (`SIGKILL`) recovery proof;
 - trace recording, replay, and benchmarking;
 - CLI or HTTP result exposure.
@@ -57,7 +60,7 @@ Central scheduler + global budget
 Fetch outcomes and observed state feed back into the scheduler.
 ```
 
-The core provider-to-storage path is implemented through hourly results: CityBikes responses are validated, normalized according to reproducible network configuration, composed only from snapshots that were already fetched and remain provider-valid at the composition instant, aggregated over explicit validity intervals, and persisted in SQLite. Network snapshots are retained historically so a later HTTP fetch with older provider state does not destroy a still-usable cached snapshot. Normal close/reopen recovery is tested. Request-budget control, adaptive scheduling, actual hard-kill recovery proof, deterministic replay/benchmarking, and result exposure are not yet implemented.
+The core provider-to-storage path is implemented through hourly results, and request authorization now has a persistent global budget guard. CityBikes responses are validated, normalized according to reproducible network configuration, composed only from snapshots that were already fetched and remain provider-valid at the composition instant, aggregated over explicit validity intervals, and persisted in SQLite. Network snapshots are retained historically so a later HTTP fetch with older provider state does not destroy a still-usable cached snapshot. The budget controller durably reserves a request before permitting it, reconciles from the provider's post-request remaining count, never locally refills an expired window, and fails closed when budget state cannot be trusted. Normal close/reopen recovery is tested. Adaptive scheduling, actual hard-kill recovery proof, deterministic replay/benchmarking, and result exposure are not yet implemented.
 
 ## Development Requirements
 
