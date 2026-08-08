@@ -31,7 +31,14 @@ The completed service will collect validated availability observations, schedule
 - provider-valid cached network selection that prefers source freshness over HTTP fetch recency;
 - persistent global CityBikes request-budget controller with durable reservation-before-request accounting;
 - runtime budget reconciliation from provider-reported post-request `remaining` values;
-- conservative bootstrap, reset, exhaustion, and fail-closed handling, including hostile persisted-state validation.
+- conservative bootstrap, reset, exhaustion, and fail-closed handling, including hostile persisted-state validation;
+- centralized adaptive scheduler with one global provider request in flight at a time;
+- earliest-deadline-first network selection with deterministic tie-breaking and no per-city/per-network timers;
+- rolling R5 city-observation policy targeting a complete observation every 240 seconds with a 300-second overdue threshold;
+- run-local R2 fetch usefulness metrics for availability changes, freshness refreshes, redundant fetches, and failures;
+- runtime budget-derived sustainable polling floor with explicit capacity-insufficient signaling;
+- provider-freshness-aware scheduler classification so historical/older provider state is not mistaken for new availability;
+- deadline pacing that prevents expiry-safety logic from polling earlier than the known sustainable budget floor.
 
 ### Provider reconnaissance and semantic analysis completed
 
@@ -43,7 +50,7 @@ The completed service will collect validated availability observations, schedule
 
 ### Not yet implemented
 
-- adaptive centralized scheduler, fairness, and R5/R2 policy;
+- production service loop / runtime orchestration around the scheduler;
 - hard-kill (`SIGKILL`) recovery proof;
 - trace recording, replay, and benchmarking;
 - CLI or HTTP result exposure.
@@ -60,7 +67,7 @@ Central scheduler + global budget
 Fetch outcomes and observed state feed back into the scheduler.
 ```
 
-The core provider-to-storage path is implemented through hourly results, and request authorization now has a persistent global budget guard. CityBikes responses are validated, normalized according to reproducible network configuration, composed only from snapshots that were already fetched and remain provider-valid at the composition instant, aggregated over explicit validity intervals, and persisted in SQLite. Network snapshots are retained historically so a later HTTP fetch with older provider state does not destroy a still-usable cached snapshot. The budget controller durably reserves a request before permitting it, reconciles from the provider's post-request remaining count, never locally refills an expired window, and fails closed when budget state cannot be trusted. Normal close/reopen recovery is tested. Adaptive scheduling, actual hard-kill recovery proof, deterministic replay/benchmarking, and result exposure are not yet implemented.
+The core provider-to-storage path, persistent request-budget guard, and centralized adaptive scheduling policy are implemented. Each scheduler step materializes due city observations from provider-valid cached state, selects at most one due network, reserves budget before the HTTP request, reconciles runtime rate-limit metadata, normalizes and persists successful history, classifies fetch usefulness, and advances that network's deadline. R5 is interpreted as a rolling five-minute requirement with a 240-second target; R2 tracks availability changes, freshness-only refreshes, redundant fetches, and failures. Polling cadence is derived from the provider's current remaining budget/reset window and never intentionally runs below the known sustainable pacing floor. The remaining major work is production orchestration, actual hard-kill recovery proof, deterministic trace/replay benchmarking, result exposure, the final impossible-pair proof, and submission packaging.
 
 ## Development Requirements
 

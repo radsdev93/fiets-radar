@@ -108,7 +108,7 @@ R6 remains a hard invariant. The earlier proof must not be replaced with another
 
 ### Consequences
 
-After runtime budget state has been established, the scheduler must not issue a request unless that state indicates that it is safe. Benchmarking must report actual R5 compliance rather than claiming it from the design. It must also report actual request accounting, including retries and failures.
+After runtime budget state has been established, the scheduler must not issue a request unless that state indicates that it is safe. City observations themselves do not require HTTP requests: due observations may be materialized from already-fetched component snapshots while those snapshots remain provider-valid. Benchmarking must still report actual rolling R5 compliance rather than claiming it solely from the 240-second target, and it must report actual request accounting, including failures.
 
 ### R6 bootstrap ambiguity and fail-closed policy
 
@@ -469,9 +469,203 @@ No verified push mechanism or cache validator lets the scheduler know in advance
 
 ---
 
+## Decision 6: Centralized Adaptive Scheduler, Rolling R5, and Runtime Pacing
+
+### Context
+
+The scheduler must simultaneously support:
+
+- R1 adaptive polling based on observed runtime behavior;
+- R2 avoidance/reporting of redundant fetches;
+- R3 one centralized scheduler and one global provider budget;
+- R4 fairness/no starvation;
+- R5 complete city observations in every five-minute window;
+- R6 strict adherence to the provider's runtime-discovered global budget;
+- R8 deterministic unit testing with fake time and no real waits.
+
+The provider evidence also shows that a later HTTP response can carry older provider state, so HTTP recency cannot be treated as source freshness.
+
+### Decision
+
+The scheduler is implemented as an explicit `step()` operation. A step performs free local composition work first and then performs **at most one provider fetch**:
+
+```text
+materialize due cities from cached provider-valid state
+→ select one due network
+→ reserve request budget durably
+→ await one HTTP request
+→ reconcile or fail closed
+→ normalize/classify/persist
+→ advance that network deadline
+→ attempt due city composition again
+```
+
+Concurrent `step()` calls do not start another provider request; the second call returns `busy`.
+
+No per-city or per-network timers are used. Production orchestration can call `step()` repeatedly later.
+
+### Rolling R5 interpretation
+
+R5 is interpreted as a **rolling** five-minute requirement, not aligned `00/05/10/...` clock buckets.
+
+A fixed-bucket interpretation can satisfy adjacent buckets with observations near opposite edges while leaving an almost ten-minute gap. The scheduler instead targets:
+
+```text
+CITY_OBSERVATION_TARGET_SECONDS = 240
+R5_WINDOW_SECONDS = 300
+```
+
+A complete city observation is due every 240 seconds. A city is reported overdue after more than 300 seconds without a run-local complete observation.
+
+A city observation does not itself consume provider budget. If every required component network has a snapshot satisfying:
+
+```text
+fetchedAt <= asOf
+validFrom <= asOf < validUntil
+```
+
+the city can be composed and persisted at `asOf` without another HTTP request.
+
+Incomplete compositions never become official city observations.
+
+### Network selection and fairness
+
+The scheduler builds one unique deterministic network list from the existing city configuration.
+
+Selection is earliest-deadline-first:
+
+1. missing usable state is immediately due unless a previous failure already moved that network's deadline forward;
+2. otherwise use the network's adaptive `nextPollAt`;
+3. ties use stable configuration order.
+
+After a network is fetched, its deadline moves forward. This makes other equally overdue networks become eligible and avoids repeatedly selecting the same resource while others remain due.
+
+### Fetch usefulness classification
+
+Each actual provider fetch is classified as exactly one of:
+
+```text
+availability-change
+freshness-refresh
+redundant
+failure
+```
+
+The classification is semantic and provider-time-aware:
+
+- the first currently usable state is a freshness refresh;
+- a changed `freeBikes` value is an availability change only when the provider state is not older than the state already in use;
+- unchanged availability with improved provider-backed freshness is a freshness refresh;
+- a successful but older provider state is redundant;
+- a successful historical snapshot that is already expired at fetch completion may still be persisted for history, but is a scheduling failure because it supplies no usable current state;
+- HTTP/client/normalization outcomes that produce no usable normalized state are failures.
+
+Run-local metrics track:
+
+```text
+totalFetches
+availabilityChanges
+freshnessRefreshes
+redundantFetches
+failures
+redundantRatio = redundantFetches / totalFetches
+```
+
+The ratio is kept unrounded internally.
+
+### Adaptive interval policy
+
+The scheduler uses a deliberately small explainable heuristic:
+
+```text
+availability change → shorten cadence
+freshness refresh   → keep roughly the current cadence
+redundant            → back off
+failure              → conservative backoff
+```
+
+The interval is also bounded by runtime provider capacity and provider-backed freshness.
+
+No provider limit such as `300/hour` is hardcoded into the scheduling policy.
+
+When the request-budget controller exposes an established state with positive remaining budget and a future reset, the scheduler derives:
+
+```text
+remainingWindowMs = resetAt - now
+
+sustainableFloorMs =
+  ceil(
+    configuredNetworkCount
+    * remainingWindowMs
+    / remaining
+  )
+```
+
+This asks: if all configured networks had to share the currently remaining request budget at roughly equal cadence, how far apart would each network's requests need to be?
+
+### Freshness ceiling and capacity conflict
+
+The normal freshness ceiling is derived from configured `maxStaleness` with a 60-second safety margin when possible:
+
+```text
+freshnessCeiling =
+  maxStaleness - safetyMargin
+```
+
+If the runtime sustainable floor is longer than that freshness ceiling, the scheduler exposes:
+
+```text
+capacityInsufficient = true
+```
+
+and does not intentionally violate R6 merely to preserve freshness.
+
+When capacity is not globally insufficient, expiry-safety logic may still pull a poll earlier than the adaptive preference, but it may **not** pull the actual deadline earlier than an already-known sustainable pacing floor.
+
+Conceptually:
+
+```text
+preferred =
+  min(adaptiveDeadline, expirySafetyDeadline)
+
+actual =
+  max(start + sustainableFloor, preferred)
+```
+
+when a trustworthy sustainable floor exists.
+
+This prevents near-expiry/stale provider responses from creating immediate retry loops that waste budget and undermine fairness.
+
+### Source freshness correction
+
+Human review found two cases where the first scheduler implementation treated HTTP-success data too optimistically:
+
+1. an already-expired normalized provider interval was counted as `freshness-refresh`;
+2. an older provider state with a different bike count was counted as `availability-change`.
+
+Both cases type-checked and passed the original generated scheduler suite.
+
+The corrected scheduler persists historical normalized snapshots but only treats them as currently useful when:
+
+```text
+validFrom <= fetchedAt < validUntil
+```
+
+and it classifies provider-state regressions as redundant rather than as new availability changes.
+
+### Consequences and cost
+
+The scheduler is adaptive and budget-aware but intentionally heuristic, not an optimal control algorithm.
+
+Run-local adaptive interval state is not persisted across restart. Durable correctness comes from persisted provider snapshots, city observations, hourly results, and request-budget state; scheduling heuristics are reconstructed conservatively after restart.
+
+The policy can report `capacityInsufficient`, but it cannot make an impossible provider-capacity situation disappear. If runtime capacity is too low to refresh all necessary components before their provider-backed validity expires, R6 safety wins and actual R5 compliance may degrade. The benchmark must measure that result rather than infer compliance from the design.
+
+The current implementation is a policy engine, not yet the final infinite service loop. Runtime orchestration, trace recording, benchmark replay, and process-level recovery testing remain separate work.
+
+---
+
 ## Remaining Open Questions
 
-- Does R5 mean aligned five-minute windows or every rolling five-minute interval?
 - What small future-timestamp and clock-skew policy is appropriate?
 - Which final impossible requirement pair can be proven as required by the challenge?
-- What scheduler policy and weights are justified once city composition and persisted domain state are implemented and testable?
