@@ -356,13 +356,13 @@ The implementation therefore records this as a materially underspecified require
 
 ### Consequences
 
-The city/aggregation boundary now needs an explicit expiry rather than assuming every city observation is valid for exactly `maxStaleness` seconds after `observedAt`.
+The city/aggregation boundary uses explicit expiry rather than assuming every composed city observation is valid for exactly `maxStaleness` seconds after `observedAt`.
+
+The interval-aware aggregation path accepts observations shaped as `timestamp`, `validUntil`, and `freeBikes`. The original challenge-facing `timestamp + maxStaleness` API remains available as a compatibility wrapper that converts to explicit validity intervals and delegates to the same aggregation engine.
 
 That is a deliberate conservative deviation from mechanically reapplying `[observedAt, observedAt + maxStaleness)` after composition. It avoids inventing freshness the provider evidence does not support.
 
 This model can reduce coverage when one component is close to expiry. The benchmark should expose that cost rather than hiding it.
-
-The currently implemented aggregator still assumes `timestamp + maxStaleness`; it requires a focused tested adaptation after city composition is implemented.
 
 ---
 

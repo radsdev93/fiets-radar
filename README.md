@@ -23,7 +23,9 @@ The completed service will collect validated availability observations, schedule
 - reproducible configuration for the 20 required cities and 30 selected network resources;
 - evidence-backed network normalization for station-only, vehicle-only, and combined representations;
 - source-time validity intervals that do not refresh stale provider state from HTTP fetch time;
-- deterministic Bay Wheels filtering for the San Francisco slice.
+- deterministic Bay Wheels filtering for the San Francisco slice;
+- causal complete/incomplete city composition from cached network snapshots;
+- interval-aware hourly aggregation with explicit per-observation expiry while preserving the original Golden Vector API.
 
 ### Provider reconnaissance and semantic analysis completed
 
@@ -35,7 +37,6 @@ The completed service will collect validated availability observations, schedule
 
 ### Not yet implemented
 
-- complete/incomplete city composition;
 - scheduler and budget controller;
 - persistence and recovery;
 - trace recording, replay, and benchmarking;
@@ -53,7 +54,7 @@ Central scheduler + global budget
 Fetch outcomes and observed state feed back into the scheduler.
 ```
 
-The aggregation logic, core CityBikes provider boundary, reproducible city/network configuration, and network normalization are implemented. The normalizer applies explicit representation modes, bicycle-kind semantics, geographic filtering where configured, and conservative source-time validity intervals. City composition, request-budget control, adaptive scheduling, persistence/recovery, deterministic replay/benchmarking, and result exposure are not yet implemented.
+The core provider-to-domain path is implemented through complete city observations: CityBikes responses are validated, normalized according to reproducible network configuration, and composed only from snapshots that were already fetched and remain provider-valid at the composition instant. Hourly aggregation now accepts explicit validity intervals so composed observations can expire earlier than a fresh `maxStaleness` window without inventing coverage. Request-budget control, adaptive scheduling, persistence/recovery, deterministic replay/benchmarking, and result exposure are not yet implemented.
 
 ## Development Requirements
 
