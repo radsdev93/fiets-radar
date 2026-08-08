@@ -1,9 +1,12 @@
-import type { CityBikesFetchResult } from "../citybikes/client";
+import {
+  fetchCityBikesNetwork,
+  type CityBikesFetchResult,
+  type FetchLike,
+} from "../citybikes/client";
 import type { CityConfig, ConfiguredNetwork } from "../config/cities";
 import { normalizeNetworkSnapshot } from "../normalization/network-normalizer";
-import type { CityBikesNetworkFetcher } from "../scheduler/adaptive-scheduler";
 import type { RequestBudgetController } from "../scheduler/request-budget";
-import type { RecordedTrace, TraceRound, TraceSample } from "./trace-format";
+import type { RawTraceResponse, RecordedTrace, TraceRound } from "./trace-format";
 
 export interface TraceRecorderClock {
   now(): Date;
@@ -14,27 +17,21 @@ export interface TraceRecorderOptions {
   maxStalenessSeconds: number;
   budget: RequestBudgetController;
   clock: TraceRecorderClock;
-  fetchNetwork: CityBikesNetworkFetcher;
-}
-
-export interface TraceRecordingResult {
-  trace: RecordedTrace;
-  stoppedEarly: string | null;
-  requests: number;
+  fetchImpl: FetchLike;
 }
 
 function configuredNetworks(cityConfigs: CityConfig[]): ConfiguredNetwork[] {
-  const byId = new Map<string, ConfiguredNetwork>();
+  const networks = new Map<string, ConfiguredNetwork>();
 
   for (const city of cityConfigs) {
     for (const network of city.networks) {
-      if (!byId.has(network.networkId)) {
-        byId.set(network.networkId, network);
+      if (!networks.has(network.networkId)) {
+        networks.set(network.networkId, network);
       }
     }
   }
 
-  return [...byId.values()];
+  return [...networks.values()];
 }
 
 function reconcileBudget(
@@ -55,10 +52,6 @@ function reconcileBudget(
   }
 }
 
-function diagnosticKind(result: CityBikesFetchResult): string {
-  return result.kind;
-}
-
 export class TraceRecorder {
   private readonly networks: ConfiguredNetwork[];
 
@@ -70,7 +63,7 @@ export class TraceRecorder {
     rounds: number,
     intervalSeconds: number,
     wait: (milliseconds: number) => Promise<void>,
-  ): Promise<TraceRecordingResult> {
+  ): Promise<{ trace: RecordedTrace; stoppedEarly: string | null; requests: number }> {
     if (!Number.isSafeInteger(rounds) || rounds <= 0) {
       throw new Error("rounds must be a positive integer");
     }
@@ -79,10 +72,11 @@ export class TraceRecorder {
     }
 
     const trace: RecordedTrace = {
-      version: 1,
-      provider: "CityBikes V2 normalized snapshot trace",
+      version: 2,
+      provider: "CityBikes V2 raw HTTP trace",
       recordedAt: this.copyDate(this.options.clock.now()),
       maxStalenessSeconds: this.options.maxStalenessSeconds,
+      selectedCities: this.options.cityConfigs.map((city) => city.city),
       networkIds: this.networks.map((network) => network.networkId),
       rounds: [],
     };
@@ -90,14 +84,14 @@ export class TraceRecorder {
     let stoppedEarly: string | null = null;
 
     for (let index = 0; index < rounds; index += 1) {
-      const remaining = this.options.budget.getState();
+      const budgetState = this.options.budget.getState();
 
       if (
-        remaining.kind === "established" &&
-        remaining.remaining < this.networks.length
+        budgetState.kind === "established" &&
+        budgetState.remaining < this.networks.length
       ) {
         stoppedEarly = "insufficient-budget-for-round";
-        trace.rounds.push(this.emptyRound("insufficient-budget-for-round"));
+        trace.rounds.push(this.emptyRound(stoppedEarly));
         break;
       }
 
@@ -125,7 +119,7 @@ export class TraceRecorder {
   }> {
     const round: TraceRound = {
       roundAt: this.copyDate(this.options.clock.now()),
-      samples: [],
+      responses: [],
       diagnostics: [],
     };
     let requests = 0;
@@ -145,53 +139,57 @@ export class TraceRecorder {
         };
       }
 
+      let recordedResponse: RawTraceResponse | null = null;
+      const recordingFetch: FetchLike = async (input, init) => {
+        const response = await this.options.fetchImpl(input, init);
+        const body = await response.clone().text();
+        const capturedAt = this.copyDate(this.options.clock.now());
+        recordedResponse = {
+          networkId: network.networkId,
+          capturedAt,
+          status: response.status,
+          headers: [...response.headers.entries()].sort((left, right) => {
+            const nameOrder = left[0].localeCompare(right[0]);
+            return nameOrder === 0 ? left[1].localeCompare(right[1]) : nameOrder;
+          }),
+          body,
+        };
+        return response;
+      };
       let result: CityBikesFetchResult;
       requests += 1;
 
       try {
-        result = await this.options.fetchNetwork(network.networkId);
+        result = await fetchCityBikesNetwork(network.networkId, recordingFetch);
       } catch {
         this.options.budget.failClosed();
         round.diagnostics.push({ networkId: network.networkId, kind: "network-error" });
         return { round, requests, stoppedEarly: "network-error" };
       }
 
-      const capturedAt = this.copyDate(this.options.clock.now());
-      reconcileBudget(this.options.budget, result, capturedAt);
+      const completedAt = this.copyDate(this.options.clock.now());
+
+      if (recordedResponse !== null) {
+        round.responses.push(recordedResponse);
+      }
+
+      reconcileBudget(this.options.budget, result, completedAt);
 
       if (result.kind !== "success") {
-        round.diagnostics.push({
-          networkId: network.networkId,
-          kind: diagnosticKind(result),
-        });
+        round.diagnostics.push({ networkId: network.networkId, kind: result.kind });
         continue;
       }
 
       const normalized = normalizeNetworkSnapshot(
         network,
         result.payload,
-        capturedAt,
+        completedAt,
         this.options.maxStalenessSeconds,
       );
 
       if (normalized.kind !== "success") {
-        round.diagnostics.push({
-          networkId: network.networkId,
-          kind: normalized.kind,
-        });
-        continue;
+        round.diagnostics.push({ networkId: network.networkId, kind: normalized.kind });
       }
-
-      const sample: TraceSample = {
-        networkId: normalized.networkId,
-        capturedAt,
-        freeBikes: normalized.freeBikes,
-        oldestSourceAt: this.copyDate(normalized.oldestSourceAt),
-        newestSourceAt: this.copyDate(normalized.newestSourceAt),
-        validFrom: this.copyDate(normalized.validFrom),
-        validUntil: this.copyDate(normalized.validUntil),
-      };
-      round.samples.push(sample);
     }
 
     return { round, requests, stoppedEarly: null };
@@ -200,7 +198,7 @@ export class TraceRecorder {
   private emptyRound(kind: string): TraceRound {
     return {
       roundAt: this.copyDate(this.options.clock.now()),
-      samples: [],
+      responses: [],
       diagnostics: this.networks.map((network) => ({
         networkId: network.networkId,
         kind,

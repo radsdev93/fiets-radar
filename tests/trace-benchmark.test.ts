@@ -1,89 +1,89 @@
-import { cityBikesResponseSchema } from "../src/citybikes/schemas";
-import type { CityBikesFetchResult } from "../src/citybikes/client";
 import type { CityConfig } from "../src/config/cities";
 import {
-  AdaptiveScheduler,
-  type SchedulerClock,
-} from "../src/scheduler/adaptive-scheduler";
-import { RequestBudgetController } from "../src/scheduler/request-budget";
-import { SqliteStore } from "../src/storage/sqlite-store";
-import {
-  mean,
-  meanAbsoluteError,
+  completedHourStarts,
+  runBenchmark,
+  hourlyMeanAbsoluteError,
   percentile95,
   rollingR5Compliance,
-  runBenchmark,
 } from "../src/benchmark/benchmark";
+import { resolveTraceCities } from "../src/trace/city-selection";
 import { TraceRecorder } from "../src/trace/recorder";
-import {
-  isCompleteTraceRound,
-  parseRecordedTrace,
-  serializeRecordedTrace,
-  traceRoundAvailableAt,
-} from "../src/trace/trace-format";
-import {
-  createTraceReplayNormalizer,
-  TraceReplay,
-} from "../src/trace/replay";
+import { TraceReplay } from "../src/trace/replay";
+import { parseRecordedTrace, serializeRecordedTrace } from "../src/trace/trace-format";
+import { RequestBudgetController } from "../src/scheduler/request-budget";
+import { SqliteStore } from "../src/storage/sqlite-store";
 
 function at(value: string): Date {
   return new Date(`2026-08-08T${value}Z`);
 }
 
-class FakeClock implements SchedulerClock {
-  constructor(private current: Date) {}
+const TRACE_CITY: CityConfig = {
+  city: "Trace City",
+  countryCode: "TC",
+  networks: [{ networkId: "network-a", mode: "stations-only" }],
+};
 
-  now(): Date {
-    return new Date(this.current.getTime());
-  }
+const OTHER_CITY: CityConfig = {
+  city: "Other City",
+  countryCode: "OC",
+  networks: [{ networkId: "network-b", mode: "stations-only" }],
+};
 
-  set(value: string): void {
-    this.current = at(value);
-  }
+function responseBody(freeBikes: number, timestamp: string): string {
+  return JSON.stringify({
+    network: {
+      stations: [
+        {
+          id: "station-a",
+          latitude: 1,
+          longitude: 1,
+          timestamp,
+          free_bikes: freeBikes,
+        },
+      ],
+    },
+  });
 }
-
-const TEST_CITY: CityConfig[] = [
-  {
-    city: "Trace City",
-    countryCode: "TC",
-    networks: [{ networkId: "network-a", mode: "stations-only" }],
-  },
-];
 
 function rawTrace() {
   return {
-    version: 1,
+    version: 2,
     provider: "CityBikes V2",
     recordedAt: "2026-08-08T12:00:00.000Z",
     maxStalenessSeconds: 900,
+    selectedCities: ["Trace City"],
     networkIds: ["network-a"],
     rounds: [
       {
         roundAt: "2026-08-08T12:00:00.000Z",
-        samples: [
+        responses: [
           {
             networkId: "network-a",
             capturedAt: "2026-08-08T12:00:05.000Z",
-            freeBikes: 10,
-            oldestSourceAt: "2026-08-08T11:59:00.000Z",
-            newestSourceAt: "2026-08-08T12:00:04.000Z",
-            validFrom: "2026-08-08T12:00:04.000Z",
-            validUntil: "2026-08-08T12:14:00.000Z",
+            status: 200,
+            headers: [
+              ["ratelimit-limit", "10"],
+              ["ratelimit-remaining", "9"],
+              ["ratelimit-reset", "3600"],
+            ],
+            body: responseBody(10, "2026-08-08T12:00:00Z"),
           },
         ],
         diagnostics: [],
       },
       {
         roundAt: "2026-08-08T12:05:00.000Z",
-        samples: [
+        responses: [
           {
             networkId: "network-a",
-            capturedAt: "2026-08-08T12:05:04.000Z",
-            freeBikes: 14,
-            oldestSourceAt: "2026-08-08T12:04:00.000Z",
-            newestSourceAt: "2026-08-08T12:05:00.000Z",
-            validFrom: "2026-08-08T12:05:00.000Z",
-            validUntil: "2026-08-08T12:19:00.000Z",
+            capturedAt: "2026-08-08T12:05:05.000Z",
+            status: 200,
+            headers: [
+              ["ratelimit-limit", "10"],
+              ["ratelimit-remaining", "8"],
+              ["ratelimit-reset", "3300"],
+            ],
+            body: responseBody(14, "2026-08-08T12:05:00Z"),
           },
         ],
         diagnostics: [],
@@ -96,304 +96,222 @@ function parsedTrace() {
   const trace = parseRecordedTrace(rawTrace());
 
   if (trace === null) {
-    throw new Error("Expected valid trace");
+    throw new Error("Expected valid raw trace");
   }
 
   return trace;
 }
 
-function parsedScoringTrace() {
-  const trace = rawTrace();
-  const firstRound = trace.rounds[0];
-  const secondRound = trace.rounds[1];
-
-  if (firstRound === undefined || secondRound === undefined) {
-    throw new Error("Expected scoring trace rounds");
-  }
-
-  const scoringTrace = parseRecordedTrace({
-    ...trace,
-    rounds: [
-      firstRound,
-      {
-        ...secondRound,
-        roundAt: "2026-08-08T12:05:00.000Z",
-        samples: [
-          {
-            ...secondRound.samples[0],
-            capturedAt: "2026-08-08T12:05:05.000Z",
-            validFrom: "2026-08-08T12:05:00.000Z",
-          },
-        ],
-      },
-      {
-        ...secondRound,
-        roundAt: "2026-08-08T12:10:00.000Z",
-        samples: [
-          {
-            ...secondRound.samples[0],
-            capturedAt: "2026-08-08T12:10:05.000Z",
-            oldestSourceAt: "2026-08-08T11:55:04.000Z",
-            newestSourceAt: "2026-08-08T12:10:00.000Z",
-            validFrom: "2026-08-08T12:10:00.000Z",
-            validUntil: "2026-08-08T12:10:04.000Z",
-          },
-        ],
-      },
-    ],
-  });
-
-  if (scoringTrace === null) {
-    throw new Error("Expected valid scoring trace");
-  }
-
-  return scoringTrace;
-}
-
-function success(networkId: string): CityBikesFetchResult {
-  return {
-    kind: "success",
-    networkId,
-    rateLimit: { limit: 3, remaining: 2, resetAfterSeconds: 600 },
-    payload: cityBikesResponseSchema.parse({
-      network: {
-        stations: [
-          {
-            id: "station",
-            latitude: 1,
-            longitude: 1,
-            timestamp: "2026-08-08T12:00:00Z",
-            free_bikes: 1,
-          },
-        ],
-      },
-    }),
-  };
-}
-
-describe("trace, replay, and benchmark infrastructure", () => {
-  it("runtime-validates compact traces, orders output, and identifies complete rounds", () => {
+describe("raw trace V2 and benchmark", () => {
+  it("runtime-validates raw HTTP status, headers, body, and capture time", () => {
     const trace = parsedTrace();
-    const firstRound = trace.rounds[0];
+    const response = trace.rounds[0]?.responses[0];
 
-    if (firstRound === undefined) {
-      throw new Error("Expected trace round");
-    }
-
-    expect(firstRound.samples[0]?.capturedAt).toStrictEqual(
-      at("12:00:05"),
-    );
-    expect(isCompleteTraceRound(firstRound, trace.networkIds)).toBe(true);
-    expect(serializeRecordedTrace(trace)).toContain('"version": 1');
-
-    const malformed = {
-      ...rawTrace(),
-      recordedAt: "not-a-timestamp",
-    };
-    expect(parseRecordedTrace(malformed)).toBeNull();
-  });
-
-  it("rejects duplicate samples and keeps incomplete rounds out of ground truth", () => {
-    const trace = parsedTrace();
-    const firstRound = trace.rounds[0];
-
-    if (firstRound === undefined) {
-      throw new Error("Expected trace round");
-    }
-
-    const duplicate = {
-      version: 1,
-      provider: "CityBikes V2",
-      recordedAt: "2026-08-08T12:00:00.000Z",
-      maxStalenessSeconds: 900,
-      networkIds: ["network-a"],
-      rounds: [
-        {
-          roundAt: "2026-08-08T12:00:00.000Z",
-          samples: [
-            {
-              networkId: "network-a",
-              capturedAt: "2026-08-08T12:00:00.000Z",
-              freeBikes: 1,
-              oldestSourceAt: "2026-08-08T12:00:00.000Z",
-              newestSourceAt: "2026-08-08T12:00:00.000Z",
-              validFrom: "2026-08-08T12:00:00.000Z",
-              validUntil: "2026-08-08T12:15:00.000Z",
-            },
-            {
-              networkId: "network-a",
-              capturedAt: "2026-08-08T12:00:00.000Z",
-              freeBikes: 1,
-              oldestSourceAt: "2026-08-08T12:00:00.000Z",
-              newestSourceAt: "2026-08-08T12:00:00.000Z",
-              validFrom: "2026-08-08T12:00:00.000Z",
-              validUntil: "2026-08-08T12:15:00.000Z",
-            },
-          ],
-          diagnostics: [],
-        },
-      ],
-    };
-
-    expect(parseRecordedTrace(duplicate)).toBeNull();
-    expect(
-      isCompleteTraceRound(
-        { ...firstRound, samples: [], diagnostics: [{ networkId: "network-a", kind: "failure" }] },
-        trace.networkIds,
-      ),
-    ).toBe(false);
-  });
-
-  it("does not replay a complete round until its latest sample capture time", () => {
-    const replay = new TraceReplay(parsedTrace());
-
-    expect(replay.sample("network-a", at("11:59:59"))).toBeNull();
-    expect(replay.sample("network-a", at("12:00:04"))).toBeNull();
-    expect(replay.sample("network-a", at("12:00:05"))?.freeBikes).toBe(10);
-    expect(replay.sample("network-a", at("12:05:03"))?.freeBikes).toBe(10);
-    const sample = replay.sample("network-a", at("12:05:04"));
-
-    expect(sample?.freeBikes).toBe(14);
-    expect(sample?.oldestSourceAt).toStrictEqual(at("12:04:00"));
-  });
-
-  it("uses the latest capture in a multi-network round and rejects pre-round captures", () => {
-    const multiNetworkTrace = parseRecordedTrace({
-      version: 1,
-      provider: "CityBikes V2",
-      recordedAt: "2026-08-08T12:00:00.000Z",
-      maxStalenessSeconds: 900,
-      networkIds: ["network-a", "network-b"],
-      rounds: [
-        {
-          roundAt: "2026-08-08T12:00:00.000Z",
-          samples: [
-            {
-              networkId: "network-a",
-              capturedAt: "2026-08-08T12:00:03.000Z",
-              freeBikes: 1,
-              oldestSourceAt: "2026-08-08T12:00:00.000Z",
-              newestSourceAt: "2026-08-08T12:00:00.000Z",
-              validFrom: "2026-08-08T12:00:00.000Z",
-              validUntil: "2026-08-08T12:15:00.000Z",
-            },
-            {
-              networkId: "network-b",
-              capturedAt: "2026-08-08T12:00:11.000Z",
-              freeBikes: 1,
-              oldestSourceAt: "2026-08-08T12:00:00.000Z",
-              newestSourceAt: "2026-08-08T12:00:00.000Z",
-              validFrom: "2026-08-08T12:00:00.000Z",
-              validUntil: "2026-08-08T12:15:00.000Z",
-            },
-          ],
-          diagnostics: [],
-        },
-      ],
-    });
-
-    if (multiNetworkTrace === null) {
-      throw new Error("Expected valid multi-network trace");
-    }
-
-    const round = multiNetworkTrace.rounds[0];
-
-    if (round === undefined) {
-      throw new Error("Expected multi-network round");
-    }
-
-    expect(traceRoundAvailableAt(round)).toStrictEqual(at("12:00:11"));
-    expect(new TraceReplay(multiNetworkTrace).sample("network-a", at("12:00:10"))).toBeNull();
-    expect(new TraceReplay(multiNetworkTrace).sample("network-a", at("12:00:11"))?.freeBikes).toBe(1);
-
-  });
-
-  it("rejects samples captured before their round begins", () => {
+    expect(response?.status).toBe(200);
+    expect(response?.headers).toContainEqual(["ratelimit-limit", "10"]);
+    expect(response?.body).toContain("free_bikes");
+    expect(response?.capturedAt).toStrictEqual(at("12:00:05"));
+    expect(parseRecordedTrace({ ...rawTrace(), version: 1 })).toBeNull();
     expect(
       parseRecordedTrace({
         ...rawTrace(),
         rounds: [
           {
             ...rawTrace().rounds[0],
-            samples: [
-              {
-                ...rawTrace().rounds[0].samples[0],
-                capturedAt: "2026-08-08T11:59:59.000Z",
-              },
-            ],
+            responses: [{ ...rawTrace().rounds[0].responses[0], status: "200" }],
           },
         ],
       }),
     ).toBeNull();
   });
 
-  it("lets the real scheduler consume a replay normalizer while preserving its default normalizer", async () => {
+  it("replay does not use future raw responses and routes the body through the CityBikes client", async () => {
     const replay = new TraceReplay(parsedTrace());
-    const store = new SqliteStore(":memory:");
-    const budget = new RequestBudgetController(store);
-    const clock = new FakeClock(at("12:05:04"));
-    const replayScheduler = new AdaptiveScheduler({
-      cityConfigs: TEST_CITY,
-      store,
-      budget,
-      clock,
-      fetchNetwork: async (networkId) => success(networkId),
-      maxStalenessSeconds: 900,
-      normalizer: createTraceReplayNormalizer(replay),
-    });
 
-    try {
-      expect(await replayScheduler.step()).toMatchObject({
-        kind: "fetched",
-        usefulness: "freshness-refresh",
-      });
-      expect(
-        store.findUsableNetworkSnapshot("network-a", clock.now())?.freeBikes,
-      ).toBe(14);
-    } finally {
-      store.close();
-    }
+    expect(replay.response("network-a", at("12:00:04"))).toBeNull();
+    expect(replay.response("network-a", at("12:00:05"))?.body).toContain("free_bikes");
+    expect(await replay.fetchNetwork("network-a", at("12:00:05"))).toMatchObject({
+      kind: "success",
+      networkId: "network-a",
+    });
   });
 
-  it("keeps fixed polling fixed and budget-authorized", async () => {
-    const store = new SqliteStore(":memory:");
-    const budget = new RequestBudgetController(store);
-    const clock = new FakeClock(at("12:00:00"));
-    let requests = 0;
-    const scheduler = new AdaptiveScheduler({
-      cityConfigs: TEST_CITY,
-      store,
-      budget,
-      clock,
-      fetchNetwork: async (networkId) => {
-        requests += 1;
-        return success(networkId);
-      },
-      maxStalenessSeconds: 900,
-      pollingMode: { kind: "fixed", intervalMs: 120_000 },
-    });
+  it("rejects duplicate or pre-round raw responses", () => {
+    const firstResponse = rawTrace().rounds[0].responses[0];
 
-    try {
-      await scheduler.step();
-      expect(scheduler.getNetworkSchedule("network-a")?.intervalMs).toBe(120_000);
-      clock.set("12:02:00");
-      await scheduler.step();
-      expect(requests).toBe(2);
-      expect(scheduler.getNetworkSchedule("network-a")?.intervalMs).toBe(120_000);
-    } finally {
-      store.close();
-    }
+    expect(
+      parseRecordedTrace({
+        ...rawTrace(),
+        rounds: [{
+          ...rawTrace().rounds[0],
+          responses: [firstResponse, firstResponse],
+        }],
+      }),
+    ).toBeNull();
+    expect(
+      parseRecordedTrace({
+        ...rawTrace(),
+        rounds: [{
+          ...rawTrace().rounds[0],
+          responses: [{ ...firstResponse, capturedAt: "2026-08-08T11:59:59.000Z" }],
+        }],
+      }),
+    ).toBeNull();
   });
 
-  it("defines deterministic staleness, percentile, rolling R5, and MAE metrics", () => {
-    expect(mean([10, 20, 30])).toBe(20);
+  it("selects the latest causal raw response and surfaces malformed recorded bodies", async () => {
+    const replay = new TraceReplay(parsedTrace());
+
+    expect(replay.response("network-a", at("12:05:04"))?.body).toContain("free_bikes");
+    expect(replay.response("network-a", at("12:05:05"))?.body).toContain("14");
+
+    const malformedTrace = parseRecordedTrace({
+      ...rawTrace(),
+      rounds: [{
+        ...rawTrace().rounds[0],
+        responses: [{ ...rawTrace().rounds[0].responses[0], body: "{ bad JSON" }],
+      }],
+    });
+
+    if (malformedTrace === null) {
+      throw new Error("Expected structurally valid malformed-body trace");
+    }
+
+    expect(
+      await new TraceReplay(malformedTrace).fetchNetwork("network-a", at("12:00:05")),
+    ).toMatchObject({ kind: "malformed-json" });
+  });
+
+  it("serializes V2 responses deterministically", () => {
+    const first = serializeRecordedTrace(parsedTrace());
+    const second = serializeRecordedTrace(parsedTrace());
+
+    expect(first).toBe(second);
+    expect(first).toContain('"version": 2');
+  });
+
+  it("uses nearest-rank p95 for source-based staleness reporting", () => {
     expect(percentile95([0, 10, 20, 30, 40])).toBe(40);
-    expect(meanAbsoluteError([{ actual: 10, expected: 14 }, { actual: 8, expected: 6 }])).toBe(3);
-    expect(meanAbsoluteError([])).toBeNull();
+  });
 
+  it("resolves an explicit city subset deterministically and rejects invalid selections", () => {
+    expect(resolveTraceCities(["Other City", "Trace City"], [TRACE_CITY, OTHER_CITY])).toStrictEqual([
+      OTHER_CITY,
+      TRACE_CITY,
+    ]);
+    expect(() => resolveTraceCities(["Trace City", "Trace City"], [TRACE_CITY])).toThrow();
+    expect(() => resolveTraceCities(["Missing"], [TRACE_CITY])).toThrow();
+  });
+
+  it("records raw responses through the real client path without converting a failure to zero", async () => {
+    const store = new SqliteStore(":memory:");
+    const recorder = new TraceRecorder({
+      cityConfigs: [TRACE_CITY],
+      maxStalenessSeconds: 900,
+      budget: new RequestBudgetController(store),
+      clock: { now: () => at("12:00:05") },
+      fetchImpl: async () => new Response(responseBody(10, "2026-08-08T12:00:00Z"), {
+        status: 200,
+        headers: {
+          "ratelimit-limit": "10",
+          "ratelimit-remaining": "9",
+          "ratelimit-reset": "3600",
+        },
+      }),
+    });
+
+    try {
+      const result = await recorder.record(1, 60, async () => undefined);
+      expect(result.trace.rounds[0]?.responses[0]?.body).toContain("free_bikes");
+      expect(result.trace.rounds[0]?.responses[0]?.status).toBe(200);
+      expect(result.trace.rounds[0]?.diagnostics).toStrictEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("stops the recorder without creating a fake response when its budget is fail-closed", async () => {
+    const store = new SqliteStore(":memory:");
+    const budget = new RequestBudgetController(store);
+    budget.reserve(at("12:00:00"));
+    budget.failClosed();
+    const recorder = new TraceRecorder({
+      cityConfigs: [TRACE_CITY],
+      maxStalenessSeconds: 900,
+      budget,
+      clock: { now: () => at("12:00:05") },
+      fetchImpl: async () => new Response("unreachable"),
+    });
+
+    try {
+      const result = await recorder.record(1, 60, async () => undefined);
+      expect(result.requests).toBe(0);
+      expect(result.trace.rounds[0]?.responses).toStrictEqual([]);
+      expect(result.stoppedEarly).not.toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("uses selected trace cities only and collects staleness at ticks", async () => {
+    const result = await runBenchmark({
+      trace: parsedTrace(),
+      cityConfigs: [TRACE_CITY, OTHER_CITY],
+      requestBudget: 2,
+      evaluationTickSeconds: 30,
+    });
+
+    expect(result.metadata.selectedCities).toStrictEqual(["Trace City"]);
+    expect(result.adaptive.stalenessSampleCount).toBeGreaterThan(2);
+  });
+
+  it("samples staleness at regular ticks, not a trace-only availability event", async () => {
+    const traceInput = rawTrace();
+    const secondRound = traceInput.rounds[1];
+
+    if (secondRound === undefined) {
+      throw new Error("Expected second trace round");
+    }
+
+    traceInput.rounds[1] = {
+      ...secondRound,
+      roundAt: "2026-08-08T12:00:15.000Z",
+      responses: [{
+        ...secondRound.responses[0],
+        capturedAt: "2026-08-08T12:00:20.000Z",
+        body: responseBody(14, "2026-08-08T12:00:15Z"),
+      }],
+    };
+    const trace = parseRecordedTrace(traceInput);
+
+    if (trace === null) {
+      throw new Error("Expected valid trace with an inter-tick availability event");
+    }
+
+    const result = await runBenchmark({
+      trace,
+      cityConfigs: [TRACE_CITY],
+      requestBudget: 2,
+      evaluationTickSeconds: 30,
+    });
+
+    expect(result.adaptive.stalenessSampleCount).toBe(2);
+    expect(result.fixed.stalenessSampleCount).toBe(2);
+  });
+
+  it("uses only completed clock hours for hourly-average MAE", () => {
+    expect(
+      completedHourStarts(at("12:20:00"), at("13:40:00")).map((hour) =>
+        hour.toISOString(),
+      ),
+    ).toStrictEqual(["2026-08-08T12:00:00.000Z"]);
+  });
+
+  it("measures rolling R5 compliance over complete rolling windows", () => {
     const observations = new Map<string, readonly Date[]>([
       ["Trace City", [at("12:04:59")]],
     ]);
+
     expect(
       rollingR5Compliance(
         observations,
@@ -401,68 +319,43 @@ describe("trace, replay, and benchmark infrastructure", () => {
         at("12:00:00"),
         at("12:10:00"),
       ),
-    ).toBeCloseTo(0.5, 8);
-  });
-
-  it("runs deterministic same-budget adaptive and fixed replay without using strategy data as trace ground truth", async () => {
-    const result = await runBenchmark({
-      trace: parsedTrace(),
-      cityConfigs: TEST_CITY,
-      requestBudget: 2,
-      evaluationTickSeconds: 30,
-    });
-
-    expect(result).toMatchObject({
-      metadata: { requestBudget: 2 },
-      adaptive: { requests: expect.any(Number) },
-      fixed: { requests: expect.any(Number) },
-    });
-    expect(result.adaptive.requests).toBeLessThanOrEqual(2);
-    expect(result.fixed.requests).toBeLessThanOrEqual(2);
-  });
-
-  it("scores a trace checkpoint before replaying that checkpoint into the scheduler", async () => {
-    const result = await runBenchmark({
-      trace: parsedScoringTrace(),
-      cityConfigs: TEST_CITY,
-      requestBudget: 2,
-      evaluationTickSeconds: 30,
-    });
-
-    expect(result.fixed.maeSampleCount).toBe(1);
-    expect(result.fixed.maeFreeBikes).toBe(4);
-  });
-
-  it("records normalized samples with fakes, never turns failures into zero, and stops when budget blocks", async () => {
-    const store = new SqliteStore(":memory:");
-    const budget = new RequestBudgetController(store);
-    const clock = new FakeClock(at("12:00:00"));
-    const recorder = new TraceRecorder({
-      cityConfigs: TEST_CITY,
-      maxStalenessSeconds: 900,
-      budget,
-      clock,
-      fetchNetwork: async (networkId) => success(networkId),
-    });
-    let waits = 0;
-
-    try {
-      const recorded = await recorder.record(1, 60, async () => {
-        waits += 1;
-      });
-
-      expect(recorded.requests).toBe(1);
-      expect(recorded.trace.rounds[0]?.samples[0]?.oldestSourceAt).toStrictEqual(
+    ).toBeCloseTo(299 / 300, 10);
+    expect(
+      rollingR5Compliance(
+        observations,
+        ["Trace City"],
         at("12:00:00"),
-      );
-      expect(waits).toBe(0);
-      budget.failClosed();
-      const blocked = await recorder.record(1, 60, async () => undefined);
-      expect(blocked.requests).toBe(0);
-      expect(blocked.trace.rounds[0]?.samples).toStrictEqual([]);
-      expect(blocked.stoppedEarly).not.toBeNull();
-    } finally {
-      store.close();
-    }
+        at("12:04:00"),
+      ),
+    ).toBe(0);
+  });
+
+  it("compares hourly averages and excludes missing averages rather than treating them as zero", () => {
+    const comparison = hourlyMeanAbsoluteError(
+      new Map([
+        ["TC:Trace City:2026-08-08T12:00:00.000Z", {
+          coveredSeconds: 900,
+          averageFreeBikes: 10,
+          coverage: 0.25,
+          partial: true,
+        }],
+        ["OC:Other City:2026-08-08T12:00:00.000Z", {
+          coveredSeconds: 0,
+          averageFreeBikes: null,
+          coverage: 0,
+          partial: true,
+        }],
+      ]),
+      new Map([
+        ["TC:Trace City:2026-08-08T12:00:00.000Z", {
+          coveredSeconds: 900,
+          averageFreeBikes: 14,
+          coverage: 0.25,
+          partial: true,
+        }],
+      ]),
+    );
+
+    expect(comparison).toStrictEqual({ value: 4, sampleCount: 1 });
   });
 });

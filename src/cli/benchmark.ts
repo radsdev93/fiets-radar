@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 
 import { runBenchmark } from "../benchmark/benchmark";
 import { CITY_CONFIGS } from "../config/cities";
+import { resolveTraceCities } from "../trace/city-selection";
 import { parseRecordedTrace } from "../trace/trace-format";
 
 function requiredOption(name: string): string {
@@ -41,9 +42,11 @@ async function main(): Promise<void> {
     throw new Error("Trace does not match the validated trace format");
   }
 
+  const cityConfigs = resolveTraceCities(trace.selectedCities, CITY_CONFIGS);
+
   const result = await runBenchmark({
     trace,
-    cityConfigs: CITY_CONFIGS,
+    cityConfigs,
     requestBudget,
   });
 

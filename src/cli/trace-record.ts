@@ -1,7 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { fetchCityBikesNetwork } from "../citybikes/client";
 import {
   CITY_CONFIGS,
   DEFAULT_MAX_STALENESS_SECONDS,
@@ -9,6 +8,7 @@ import {
 import { RequestBudgetController } from "../scheduler/request-budget";
 import { SqliteStore } from "../storage/sqlite-store";
 import { TraceRecorder } from "../trace/recorder";
+import { resolveTraceCities } from "../trace/city-selection";
 import { serializeRecordedTrace } from "../trace/trace-format";
 
 function requiredOption(name: string): string {
@@ -38,18 +38,37 @@ function positiveInteger(name: string): number {
   return value;
 }
 
+function repeatedOption(name: string): string[] {
+  const values: string[] = [];
+
+  for (let index = 0; index < process.argv.length; index += 1) {
+    if (process.argv[index] === name) {
+      const value = process.argv[index + 1];
+
+      if (value === undefined || value.startsWith("--")) {
+        throw new Error(`Missing value for ${name}`);
+      }
+
+      values.push(value);
+    }
+  }
+
+  return values;
+}
+
 async function main(): Promise<void> {
   const output = requiredOption("--output");
   const rounds = positiveInteger("--rounds");
   const intervalSeconds = positiveInteger("--interval-seconds");
+  const cityConfigs = resolveTraceCities(repeatedOption("--city"), CITY_CONFIGS);
   const store = new SqliteStore(":memory:");
   const budget = new RequestBudgetController(store);
   const recorder = new TraceRecorder({
-    cityConfigs: CITY_CONFIGS,
+    cityConfigs,
     maxStalenessSeconds: DEFAULT_MAX_STALENESS_SECONDS,
     budget,
     clock: { now: () => new Date() },
-    fetchNetwork: (networkId) => fetchCityBikesNetwork(networkId, fetch),
+    fetchImpl: fetch,
   });
 
   try {

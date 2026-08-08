@@ -1,70 +1,76 @@
-import type { SchedulerNetworkNormalizer } from "../scheduler/adaptive-scheduler";
-import type { TraceSample, RecordedTrace } from "./trace-format";
-import { isCompleteTraceRound, traceRoundAvailableAt } from "./trace-format";
+import {
+  fetchCityBikesNetwork,
+  type CityBikesFetchResult,
+} from "../citybikes/client";
+import {
+  isCompleteTraceRound,
+  traceRoundAvailableAt,
+  type RawTraceResponse,
+  type RecordedTrace,
+} from "./trace-format";
 
-function copySample(sample: TraceSample): TraceSample {
+function copyResponse(response: RawTraceResponse): RawTraceResponse {
   return {
-    networkId: sample.networkId,
-    capturedAt: new Date(sample.capturedAt.getTime()),
-    freeBikes: sample.freeBikes,
-    oldestSourceAt: new Date(sample.oldestSourceAt.getTime()),
-    newestSourceAt: new Date(sample.newestSourceAt.getTime()),
-    validFrom: new Date(sample.validFrom.getTime()),
-    validUntil: new Date(sample.validUntil.getTime()),
+    networkId: response.networkId,
+    capturedAt: new Date(response.capturedAt.getTime()),
+    status: response.status,
+    headers: response.headers.map(([name, value]) => [name, value]),
+    body: response.body,
   };
 }
 
 export class TraceReplay {
   constructor(private readonly trace: RecordedTrace) {}
 
-  sample(networkId: string, at: Date): TraceSample | null {
-    let selectedSample: TraceSample | null = null;
-    let selectedAvailableAt = -Infinity;
+  response(networkId: string, at: Date): RawTraceResponse | null {
+    let selected: RawTraceResponse | null = null;
+    let selectedAt = -Infinity;
 
     for (const round of this.trace.rounds) {
       const availableAt = traceRoundAvailableAt(round).getTime();
 
       if (
         availableAt > at.getTime() ||
-        availableAt < selectedAvailableAt ||
+        availableAt < selectedAt ||
         !isCompleteTraceRound(round, this.trace.networkIds)
       ) {
         continue;
       }
 
-      const sample = round.samples.find(
+      const response = round.responses.find(
         (candidate) => candidate.networkId === networkId,
       );
 
-      if (sample !== undefined) {
-        selectedAvailableAt = availableAt;
-        selectedSample = sample;
+      if (response !== undefined) {
+        selected = response;
+        selectedAt = availableAt;
       }
     }
 
-    return selectedSample === null ? null : copySample(selectedSample);
+    return selected === null ? null : copyResponse(selected);
   }
-}
 
-export function createTraceReplayNormalizer(
-  replay: TraceReplay,
-): SchedulerNetworkNormalizer {
-  return (config, _payload, fetchedAt) => {
-    const sample = replay.sample(config.networkId, fetchedAt);
+  async fetchNetwork(
+    networkId: string,
+    at: Date,
+  ): Promise<CityBikesFetchResult> {
+    const response = this.response(networkId, at);
 
-    if (sample === null) {
-      return { kind: "no-source-data", networkId: config.networkId };
+    if (response === null) {
+      return {
+        kind: "network-error",
+        networkId,
+        error: new Error("No causal raw trace response"),
+      };
     }
 
-    return {
-      kind: "success",
-      networkId: config.networkId,
-      freeBikes: sample.freeBikes,
-      oldestSourceAt: sample.oldestSourceAt,
-      newestSourceAt: sample.newestSourceAt,
-      validFrom: sample.validFrom,
-      validUntil: sample.validUntil,
-      fetchedAt: new Date(fetchedAt.getTime()),
-    };
-  };
+    return fetchCityBikesNetwork(
+      networkId,
+      async () =>
+        new Response(response.body, {
+          status: response.status,
+          headers: new Headers(response.headers),
+        }),
+    );
+  }
 }
