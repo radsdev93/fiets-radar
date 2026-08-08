@@ -14,6 +14,17 @@ type CompleteCityObservation = Extract<
   { kind: "complete" }
 >;
 
+export type PersistedRequestBudgetState =
+  | { kind: "unknown" }
+  | { kind: "bootstrap-pending" }
+  | {
+      kind: "established";
+      limit: number;
+      remaining: number;
+      resetAt: Date;
+    }
+  | { kind: "fail-closed"; resetAt: Date | null };
+
 interface NetworkSnapshotRow {
   network_id: string;
   free_bikes: number;
@@ -37,6 +48,13 @@ interface HourlyResultRow {
   partial: number;
 }
 
+interface RequestBudgetStateRow {
+  state_kind: string;
+  limit_value: number | null;
+  remaining_value: number | null;
+  reset_at: number | null;
+}
+
 function networkSnapshotFromRow(
   row: NetworkSnapshotRow,
 ): NormalizedNetworkSnapshot {
@@ -50,6 +68,80 @@ function networkSnapshotFromRow(
     validUntil: new Date(row.valid_until),
     fetchedAt: new Date(row.fetched_at),
   };
+}
+
+function requestBudgetStateFromRow(
+  row: RequestBudgetStateRow | undefined,
+): PersistedRequestBudgetState {
+  if (row === undefined) {
+    return { kind: "unknown" };
+  }
+
+  const resetAt = dateFromEpochMilliseconds(row.reset_at);
+  const hasNoBudgetValues =
+    row.limit_value === null &&
+    row.remaining_value === null &&
+    row.reset_at === null;
+
+  if (row.state_kind === "unknown" && hasNoBudgetValues) {
+    return { kind: "unknown" };
+  }
+
+  if (row.state_kind === "bootstrap-pending" && hasNoBudgetValues) {
+    return { kind: "bootstrap-pending" };
+  }
+
+  if (
+    row.state_kind === "established" &&
+    row.limit_value !== null &&
+    row.remaining_value !== null &&
+    isValidEstablishedBudget(row.limit_value, row.remaining_value) &&
+    resetAt !== null
+  ) {
+    return {
+      kind: "established",
+      limit: row.limit_value,
+      remaining: row.remaining_value,
+      resetAt,
+    };
+  }
+
+  if (
+    row.state_kind === "fail-closed" &&
+    row.limit_value === null &&
+    row.remaining_value === null
+  ) {
+    return {
+      kind: "fail-closed",
+      resetAt,
+    };
+  }
+
+  return { kind: "fail-closed", resetAt };
+}
+
+function isValidEstablishedBudget(
+  limit: number | null,
+  remaining: number | null,
+): boolean {
+  return (
+    limit !== null &&
+    remaining !== null &&
+    Number.isSafeInteger(limit) &&
+    Number.isSafeInteger(remaining) &&
+    limit > 0 &&
+    remaining >= 0 &&
+    remaining <= limit
+  );
+}
+
+function dateFromEpochMilliseconds(value: number | null): Date | null {
+  if (value === null || !Number.isSafeInteger(value)) {
+    return null;
+  }
+
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 export class SqliteStore {
@@ -108,6 +200,14 @@ export class SqliteStore {
         coverage REAL NOT NULL,
         partial INTEGER NOT NULL,
         PRIMARY KEY (city, country_code, hour_start)
+      );
+
+      CREATE TABLE IF NOT EXISTS request_budget_state (
+        state_id INTEGER PRIMARY KEY CHECK (state_id = 1),
+        state_kind TEXT NOT NULL,
+        limit_value INTEGER,
+        remaining_value INTEGER,
+        reset_at INTEGER
       );
     `);
   }
@@ -279,5 +379,48 @@ export class SqliteStore {
       coverage: row.coverage,
       partial: row.partial !== 0,
     };
+  }
+
+  getRequestBudgetState(): PersistedRequestBudgetState {
+    const row = this.database
+      .prepare<unknown[], RequestBudgetStateRow>(`
+        SELECT state_kind, limit_value, remaining_value, reset_at
+        FROM request_budget_state
+        WHERE state_id = 1
+      `)
+      .get();
+
+    return requestBudgetStateFromRow(row);
+  }
+
+  saveRequestBudgetState(state: PersistedRequestBudgetState): void {
+    const limit = state.kind === "established" ? state.limit : null;
+    const remaining = state.kind === "established" ? state.remaining : null;
+    const resetAt =
+      state.kind === "established" || state.kind === "fail-closed"
+        ? state.resetAt
+        : null;
+
+    this.database
+      .prepare<unknown[]>(`
+        INSERT INTO request_budget_state (
+          state_id,
+          state_kind,
+          limit_value,
+          remaining_value,
+          reset_at
+        ) VALUES (1, ?, ?, ?, ?)
+        ON CONFLICT (state_id) DO UPDATE SET
+          state_kind = excluded.state_kind,
+          limit_value = excluded.limit_value,
+          remaining_value = excluded.remaining_value,
+          reset_at = excluded.reset_at
+      `)
+      .run(
+        state.kind,
+        limit,
+        remaining,
+        resetAt === null ? null : resetAt.getTime(),
+      );
   }
 }

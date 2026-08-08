@@ -5,7 +5,10 @@ import { join } from "node:path";
 import type { CityCompositionResult } from "../src/composition/city-composer";
 import { calculateHourlyAverageFromValidity, type HourlyResult } from "../src/core/aggregator";
 import type { NetworkNormalizationResult } from "../src/normalization/network-normalizer";
-import { SqliteStore } from "../src/storage/sqlite-store";
+import {
+  SqliteStore,
+  type PersistedRequestBudgetState,
+} from "../src/storage/sqlite-store";
 
 type NormalizedNetworkSnapshot = Extract<
   NetworkNormalizationResult,
@@ -334,5 +337,27 @@ describe("SqliteStore", () => {
       firstStore.close();
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it("round-trips persisted request-budget state with copied resetAt dates", () => {
+    withTemporaryStore((store) => {
+      const resetAt = at("13:00:00");
+      const state: PersistedRequestBudgetState = {
+        kind: "established",
+        limit: 300,
+        remaining: 250,
+        resetAt,
+      };
+      store.saveRequestBudgetState(state);
+      const loaded = store.getRequestBudgetState();
+
+      expect(loaded).toStrictEqual(state);
+      if (loaded.kind !== "established") {
+        throw new Error("Expected established request-budget state");
+      }
+      expect(loaded.resetAt).not.toBe(resetAt);
+      loaded.resetAt.setUTCMinutes(30);
+      expect(resetAt).toStrictEqual(at("13:00:00"));
+    });
   });
 });
