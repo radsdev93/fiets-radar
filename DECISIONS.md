@@ -60,7 +60,7 @@ The synchronous SQLite API is acceptable for the expected workload, but database
 
 R5 requires at least one observation for every city in every five-minute window of the run. R6 requires the service never to exceed the request budget reported by the provider, including retries.
 
-The August 5 capture reported an hourly limit of 300 requests. Broad discovery found 34 candidate resources, later narrowed semantically to 30 relevant candidates before the unresolved Bay Wheels geographic filter is applied. The captured details are documented in `docs/api-findings.md`.
+The August 5 capture reported an hourly limit of 300 requests. Broad discovery found 34 candidate resources, later narrowed semantically to 30 resources in the reproducible mapping. Bay Wheels is included only through the implemented deterministic San Francisco filter. The captured details are documented in `docs/api-findings.md`.
 
 ### Reassessment
 
@@ -189,7 +189,7 @@ Count:
 
 Exclude roaming `kind == "scooter"`. Do not separately add station `extra.normal_bikes` or `extra.ebikes` when `free_bikes` already contains them.
 
-Provider-specific representation differences belong in reproducible network configuration or normalization metadata, not ad-hoc string checks scattered through the algorithm. The conceptual modes are stations-only, vehicles-only, and stations-and-vehicles; exact TypeScript names are not yet implemented.
+Provider-specific representation differences belong in reproducible network configuration or normalization metadata, not ad-hoc string checks scattered through the algorithm. The implemented normalization modes are `stations-only`, `vehicles-only`, and `stations-and-vehicles`.
 
 ### Consequences
 
@@ -228,7 +228,7 @@ This is an explicit engineering approximation, not a claim that the rectangle is
 
 Do not merge Bird Los Angeles and Spin Los Angeles merely because Bird acquired Spin. **External research:** Bird's filing records the acquisition ([SEC filing](https://www.sec.gov/Archives/edgar/data/1861449/000186144923000196/brds-20230919.htm)); LADOT material has referenced both Bird and Spin ([LADOT FAQ](https://ladot.lacity.gov/about/faq)). This does not establish that Spin Los Angeles is currently active. The documented position is that CityBikes exposes it as a distinct Los Angeles resource, no official retirement evidence comparable to Kotobike was established in this investigation, and the captured source data was about 37 days stale.
 
-After the four exclusions above (three scooter-only resources and retired Kotobike), 30 of the 34 discovered resources remain semantically relevant candidates, including regional Bay Wheels, which still needs geographic filtering. This is not equivalent to 30 requests required for every city observation.
+After the four exclusions above (three scooter-only resources and retired Kotobike), 30 of the 34 discovered resources remain in the reproducible mapping. Regional Bay Wheels is included only through the deterministic San Francisco filter above. This is not equivalent to 30 requests required for every city observation.
 
 ### Consequences
 
@@ -292,21 +292,77 @@ Future provider timestamps and clock skew still require an explicit small policy
 
 A city can depend on multiple network resources, and those resources may be fetched at different times.
 
+The challenge defines an observation as a measurement of a city's total free bikes at an instant `t`, valid for `[t, t + maxStaleness)`. CityBikes does not hand this service one atomic city measurement: a network response may contain many source timestamps, and a city may require several separately fetched networks.
+
+That leaves a material question unanswered by the brief: **which instant should become `t` for a city value assembled from provider state that was produced and learned at different times?**
+
+The answer changes R5 compliance, coverage, and hourly averages.
+
+### Options considered
+
+1. **Use HTTP fetch/composition time and grant a fresh full `maxStaleness` window.**
+   Simple, but it can make already-old provider state look fresh merely because it was fetched again.
+
+2. **Backdate the city observation to the beginning of the component source-validity overlap.**
+   This preserves provider timestamps, but it creates observations at instants when the service did not yet know the complete city value. In replay it can also create time-travel if a component was fetched later.
+
+3. **Use the actual composition instant as the city observation instant, but cap expiry at the earliest provider-backed component expiry.**
+   This preserves causality and does not refresh stale source state.
+
 ### Decision
 
-- A city may combine newly fetched network measurements with cached network measurements.
-- Cached does not mean stale; a cached component may be reused only while its provider-backed validity permits it.
-- Re-fetching another network never extends a cached component's validity.
-- A complete city result is produced only when every required component has usable data and their validity intervals overlap.
-- The composed usable interval is the intersection of component validity intervals, and the total expires when the first required component expires.
+Choose option 3.
 
-If a required network is missing or stale, do not treat it as zero or store the known subtotal as the official city total. An incomplete diagnostic snapshot may retain `knownFreeBikes`, `availableNetworks`, `missingNetworks`, and `complete: false`; it does not contribute to the official hourly average.
+A city may combine newly fetched network measurements with cached network measurements, but a component is usable at composition instant `asOf` only when:
 
-The challenge's hourly `partial` flag is not a composition flag: it means hourly temporal coverage is below `0.75`.
+```text
+component.fetchedAt <= asOf
+component.validFrom <= asOf < component.validUntil
+```
+
+The first condition is a causality rule: deterministic replay must not use provider state before the service actually received it.
+
+The second condition is the provider-backed freshness rule.
+
+A complete city observation is produced only when every network in the city's reproducible configuration is usable at `asOf`.
+
+For a complete city observation:
+
+```text
+observedAt = asOf
+freeBikes  = sum(required component freeBikes)
+validUntil = minimum(required component validUntil)
+```
+
+The city observation must **not** be backdated to an earlier source timestamp or overlap start.
+
+`validUntil` is intentionally allowed to be earlier than `observedAt + maxStaleness`. The service does not extend any component's source-backed validity merely because the complete city value was assembled later.
+
+If a required component is unavailable at `asOf`, do not treat it as zero and do not persist the known subtotal as an official city observation. An incomplete diagnostic result may preserve the known subtotal and unavailable-network reasons, but it does not contribute to the official hourly average or satisfy R5 as a complete city observation.
+
+The challenge's hourly `partial` flag remains a temporal-coverage flag (`coverage < 0.75`), not a composition-completeness flag.
+
+### Why this is a material underspecification
+
+The brief's binding `[t, t + maxStaleness)` rule assumes an atomic observation at `t`, while the real provider representation exposes non-atomic source timestamps and separately fetched resources. It does not specify whether `t` means provider source time, HTTP receipt time, or composition time when these differ.
+
+Those readings can produce different observation instants and different expiry intervals, which changes:
+
+- whether an R5 five-minute window contains an observation;
+- how many seconds of an hour are covered;
+- the resulting time-weighted average.
+
+The implementation therefore records this as a materially underspecified requirement and chooses the conservative causal interpretation above.
 
 ### Consequences
 
-This model is more complex than simultaneous complete refreshes and requires explicit validity intervals through the composition/aggregation boundary. The currently implemented aggregator assumes `timestamp + maxStaleness`, so composed intervals may require a later tested extension or refactor. This documentation update does not change the aggregator.
+The city/aggregation boundary now needs an explicit expiry rather than assuming every city observation is valid for exactly `maxStaleness` seconds after `observedAt`.
+
+That is a deliberate conservative deviation from mechanically reapplying `[observedAt, observedAt + maxStaleness)` after composition. It avoids inventing freshness the provider evidence does not support.
+
+This model can reduce coverage when one component is close to expiry. The benchmark should expose that cost rather than hiding it.
+
+The currently implemented aggregator still assumes `timestamp + maxStaleness`; it requires a focused tested adaptation after city composition is implemented.
 
 ---
 
