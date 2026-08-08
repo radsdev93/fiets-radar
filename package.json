@@ -8,7 +8,9 @@
     "test": "tests"
   },
   "scripts": {
-    "test": "jest"
+    "test": "jest",
+    "trace:record": "npx tsc --outDir dist && node dist/src/cli/trace-record.js",
+    "benchmark": "npx tsc --outDir dist && node dist/src/cli/benchmark.js"
   },
   "keywords": [],
   "author": "",

@@ -18,6 +18,17 @@ export type CityBikesNetworkFetcher = (
   networkId: string,
 ) => Promise<CityBikesFetchResult>;
 
+export type SchedulerNetworkNormalizer = (
+  config: ConfiguredNetwork,
+  payload: Extract<CityBikesFetchResult, { kind: "success" }>["payload"],
+  fetchedAt: Date,
+  maxStalenessSeconds: number,
+) => NetworkNormalizationResult;
+
+export type SchedulerPollingMode =
+  | { kind: "adaptive" }
+  | { kind: "fixed"; intervalMs: number };
+
 export type FetchUsefulness =
   | "availability-change"
   | "freshness-refresh"
@@ -40,6 +51,8 @@ export interface AdaptiveSchedulerOptions {
   clock: SchedulerClock;
   fetchNetwork: CityBikesNetworkFetcher;
   maxStalenessSeconds: number;
+  normalizer?: SchedulerNetworkNormalizer;
+  pollingMode?: SchedulerPollingMode;
 }
 
 export type SchedulerStepResult =
@@ -370,7 +383,7 @@ export class AdaptiveScheduler {
       config.networkId,
       fetchedAt,
     );
-    const normalization = normalizeNetworkSnapshot(
+    const normalization = (this.options.normalizer ?? normalizeNetworkSnapshot)(
       config,
       fetchResult.payload,
       fetchedAt,
@@ -475,6 +488,10 @@ export class AdaptiveScheduler {
     previousIntervalMs: number | undefined,
     usefulness: FetchUsefulness,
   ): number {
+    if (this.options.pollingMode?.kind === "fixed") {
+      return Math.max(1, Math.ceil(this.options.pollingMode.intervalMs));
+    }
+
     const sustainableFloorMs = this.getSustainableFloorMs();
     const freshnessCeilingMs = this.freshnessCeilingMs();
     const capacityInsufficient =
@@ -504,6 +521,10 @@ export class AdaptiveScheduler {
   }
 
   private initialIntervalMs(): number {
+    if (this.options.pollingMode?.kind === "fixed") {
+      return Math.max(1, Math.ceil(this.options.pollingMode.intervalMs));
+    }
+
     const sustainableFloorMs = this.getSustainableFloorMs();
     const freshnessCeilingMs = this.freshnessCeilingMs();
 
@@ -541,6 +562,10 @@ export class AdaptiveScheduler {
     snapshot: NormalizedNetworkSnapshot | null,
   ): number {
     const adaptiveDeadlineMs = startMs + intervalMs;
+
+    if (this.options.pollingMode?.kind === "fixed") {
+      return adaptiveDeadlineMs;
+    }
 
     if (snapshot === null || this.isCapacityInsufficient()) {
       return adaptiveDeadlineMs;
