@@ -1,8 +1,8 @@
 # Architectural Decisions & Specification Resolutions
 
-This document records specification conflicts, material ambiguities, architectural choices, and their costs.
+This document records specification conflicts, material ambiguities, architectural choices, and their costs. Measured CityBikes behavior is recorded separately in [`docs/api-findings.md`](./docs/api-findings.md).
 
-> **Revision note — August 6, 2026:** Earlier revisions treated the reported hourly request limit as a separately enforced five-minute quota and overstated what choosing SQLite alone guarantees about crash recovery. Those conclusions were corrected after collecting and inventorying the full 34-response API capture and separating observed facts from design assumptions. The earlier revisions remain visible in Git history.
+> **Revision note — August 7, 2026:** Additional provider reconnaissance changed the city-resource and composition model. In particular, the earlier request arithmetic relied on a complete-refresh assumption that is no longer the chosen model. Captured facts, external/operator research, and architectural decisions are now distinguished more explicitly. Earlier revisions remain visible in Git history.
 
 ## Technical Stack and Scaffolding
 
@@ -34,7 +34,7 @@ The current stack is:
 - Zod for runtime boundary validation;
 - `better-sqlite3` as the intended local storage implementation.
 
-TypeScript 6.x was selected because the installed `ts-jest` version declared compatibility with TypeScript versions below 7. Forcing npm to ignore the peer-dependency range would have created an unsupported dependency combination without providing a benefit required by the assignment.
+TypeScript 6.x was selected because the installed `ts-jest` version declared compatibility with TypeScript versions below 7. Forcing npm to ignore the peer-dependency range would create an unsupported dependency combination without providing a benefit required by the assignment.
 
 Zod will validate untrusted CityBikes responses before they enter the internal domain model. External JSON will not be converted into trusted types through assertions such as `as NetworkResponse`.
 
@@ -54,70 +54,23 @@ The synchronous SQLite API is acceptable for the expected workload, but database
 
 ---
 
-## Specification Conflict: R5 Window Coverage vs R6 Request Budget
+## Reassessment: R5 Window Coverage and R6 Request Budget
 
 ### Context
 
-R5 requires at least one observation for every city in every five-minute window of the run.
+R5 requires at least one observation for every city in every five-minute window of the run. R6 requires the service never to exceed the request budget reported by the provider, including retries.
 
-R6 requires the service never to exceed the request budget reported by the provider. The ceiling includes retries and must be discovered from response metadata at runtime rather than assumed from configuration.
+The August 5 capture reported an hourly limit of 300 requests. Broad discovery found 34 candidate resources, later narrowed semantically to 30 relevant candidates before the unresolved Bay Wheels geographic filter is applied. The captured details are documented in `docs/api-findings.md`.
 
-The provider response captured on August 5 reported an hourly limit of 300 requests.
+### Reassessment
 
-The initial CityBikes mapping currently contains 34 candidate network endpoints for the 20 required cities.
+The earlier calculation of `34 endpoints × 12 windows = 408 requests/hour` was useful under an interpretation requiring every mapped network to be freshly fetched for every city observation. It no longer proves impossibility because the selected composition model permits still-valid cached network measurements to participate in a city state.
 
-### Proof
+R6 remains a hard invariant. The earlier proof must not be replaced with another unverified proof, and it also must not be read as proving that R5 and R6 are compatible. The challenge guarantees that at least one impossible requirement pair exists; the final proven pair remains open and must be established before submission.
 
-Under the current interpretation, one complete observation of a city requires refreshing every network included in that city's mapping.
+### Consequences
 
-Twelve five-minute windows occur in one hour:
-
-```text
-60 minutes / 5 minutes = 12 windows
-```
-
-Refreshing all 34 candidate endpoints once per window would require:
-
-```text
-34 endpoints × 12 windows = 408 requests per hour
-```
-
-The captured provider limit was:
-
-```text
-300 requests per hour
-```
-
-Therefore:
-
-```text
-408 required requests > 300 available requests
-```
-
-This minimum does not include retries, discovery requests, or a safety margin.
-
-This proves that R5 and R6 cannot both be satisfied under the current complete-refresh interpretation and candidate mapping.
-
-It does **not** prove that the provider enforces a separate quota of 25 requests inside each five-minute period. Dividing 300 by 12 gives an average allocation, not evidence of an independently enforced five-minute window.
-
-### Decision
-
-R6 will be treated as the hard invariant. The scheduler must not issue a request unless the runtime budget state indicates that the request is safe.
-
-R5 compliance will be measured and reported rather than falsely guaranteed when the discovered budget makes full compliance impossible.
-
-The scheduler must also preserve fairness so that no city is permanently starved while requests are allocated to more volatile cities.
-
-### Cost and remaining dependency
-
-Some five-minute windows may not contain a complete observation for every city.
-
-The exact size of that degradation cannot be finalized until these two decisions are complete:
-
-1. which of the 34 candidate endpoints belong in the final semantic city mapping;
-2. whether a city observation requires all mapped networks to be fetched at the same scheduling opportunity or may combine values captured at different instants.
-
-Any benchmark must report actual R5 compliance rather than claim compliance from the scheduler design alone.
+The scheduler must not issue a request unless the runtime budget state indicates that it is safe. Benchmarking must report actual R5 compliance rather than claiming it from the design. It must also report actual request accounting, including retries and failures.
 
 ---
 
@@ -131,65 +84,32 @@ The specification defines an observation at time `t` as valid for:
 [t, t + maxStaleness)
 ```
 
-It also states that uncovered seconds are excluded from both the weighted sum and the average denominator.
-
-The provided golden vector establishes the expected boundary behavior.
+It also states that uncovered seconds are excluded from both the weighted sum and the average denominator. The provided golden vector establishes the expected boundary behavior.
 
 ### Proof
 
 For the hour from `12:00:00Z` to `13:00:00Z` with `maxStaleness = 900` seconds:
 
-| Observation        | Effective covered interval | Covered seconds |
-| ------------------ | -------------------------- | --------------: |
-| `11:52`, 100 bikes | `12:00–12:07`              |             420 |
-| `12:10`, 130 bikes | `12:10–12:15`              |             300 |
-| `12:15`, 130 bikes | `12:15–12:30`              |             900 |
-| `12:50`, 70 bikes  | `12:50–13:00`              |             600 |
+| Observation | Effective covered interval | Covered seconds |
+| --- | --- | ---: |
+| `11:52`, 100 bikes | `12:00–12:07` | 420 |
+| `12:10`, 130 bikes | `12:10–12:15` | 300 |
+| `12:15`, 130 bikes | `12:15–12:30` | 900 |
+| `12:50`, 70 bikes | `12:50–13:00` | 600 |
 
-Total coverage:
-
-```text
-420 + 300 + 900 + 600 = 2220 seconds
-```
-
-Weighted total:
-
-```text
-(100 × 420)
-+ (130 × 300)
-+ (130 × 900)
-+ (70 × 600)
-= 240000 bike-seconds
-```
-
-Average:
-
-```text
-240000 / 2220 = 108.11
-```
+Total coverage is `2220` seconds. The weighted total is `240000` bike-seconds, so the average is `240000 / 2220 = 108.11`.
 
 The expired intervals `12:07–12:10` and `12:30–12:50` contribute neither time nor bike values.
 
 ### Decision
 
-The aggregation engine strictly enforces each observation's validity interval.
-
-A newer observation supersedes an older observation from its own timestamp onward, even when the older observation has not yet reached its staleness limit.
-
-Every validity interval is clipped against:
-
-* the following observation;
-* its staleness expiry;
-* the beginning of the target hour;
-* the end of the target hour.
+The aggregation engine strictly enforces each observation's validity interval. A newer observation supersedes an older observation from its own timestamp onward, even when the older observation has not reached its staleness limit. Every validity interval is clipped against the following observation, its staleness expiry, and the target-hour bounds.
 
 When no valid observation covers any portion of an hour, `averageFreeBikes` is stored as `null`, not as zero.
 
 ### Consequences
 
-The aggregation logic must operate over explicit intervals instead of carrying the last value indefinitely.
-
-A numeric zero means that valid observations reported zero free bikes. `null` means that no valid information covered the hour. Those states must remain distinct throughout storage and result exposure.
+The aggregation logic must operate over explicit intervals instead of carrying the last value indefinitely. A numeric zero means that valid observations reported zero free bikes; `null` means that no valid information covered the hour. Those states must remain distinct throughout storage and result exposure.
 
 ---
 
@@ -197,102 +117,160 @@ A numeric zero means that valid observations reported zero free bikes. `null` me
 
 ### Context
 
-CityBikes responses are untrusted external input.
-
-The assignment explicitly prohibits using a type assertion to declare the response valid without runtime checking. Tests must also be able to exercise the client without touching the real network.
-
-### Options considered
-
-* validate the full provider response and retain all fields;
-* validate only the minimum fields required by the service;
-* throw all failures to the process entry point;
-* convert failures to `null`;
-* return explicit typed outcomes for different failure categories.
+CityBikes responses are untrusted external input. The assignment prohibits using a type assertion to declare a response valid without runtime checking, and tests must exercise the client without touching the real network.
 
 ### Decision
 
-A dedicated CityBikes client will be the only HTTP boundary.
+A dedicated CityBikes client will be the only HTTP boundary. Its Zod schemas will be based on the documented observed shapes and validate only fields required to produce an internal observation. Malformed data must not become an empty network or an observation with zero bikes.
 
-The final Zod schemas will be based on the complete evidence matrix from all 34 captured candidate responses. The schemas will validate only fields required to produce an internal observation, while allowing unrelated provider-specific fields to be discarded.
-
-Malformed data must not be converted into a valid empty network or into an observation with zero bikes.
+Based on the field-selection experiment, the intended production client will use the V2 network endpoint with `?fields=stations,vehicles` so station and roaming-vehicle data can be retrieved in one request. GBFS remains an investigation aid rather than an intended runtime dependency.
 
 The client should return a discriminated outcome that distinguishes at least:
 
-* successful validated response;
-* non-success HTTP response;
-* network or transport failure;
-* malformed JSON;
-* structurally invalid provider response.
+- successful validated response;
+- non-success HTTP response;
+- network or transport failure;
+- malformed JSON;
+- structurally invalid provider response.
 
-The client will also return parsed rate-limit metadata when those headers are present.
+It will also return parsed rate-limit metadata when those headers are present.
 
 ### Consequences
 
-The scheduler must receive typed failure information because it owns:
-
-* whether and when to retry;
-* retry request accounting;
-* backoff;
-* fairness;
-* selection of the next request.
-
-The aggregator remains independent of HTTP behavior. A failed fetch creates no observation. Any coverage lost because no observation was produced is calculated later from persisted observations.
-
-The exact response schema and failure types remain open until the evidence matrix is complete.
+The scheduler owns retries, retry accounting, backoff, fairness, and selection of the next request, so it must receive typed failure information. The aggregator remains independent of HTTP behavior: a failed fetch creates no observation, and any lost coverage is calculated from persisted observations later.
 
 ---
 
-## Open Specification Questions
+## Decision 1: What Counts as a Bicycle
 
-The following questions materially affect stored results or benchmark metrics and must be resolved before their corresponding modules are implemented.
+### Context
 
-### Timestamp of a multi-network city observation
+The capture contains stations-only, vehicles-only, and mixed representations. It also demonstrates scooters and cases where station `free_bikes` already includes a station-level normal-bike/e-bike breakdown.
 
-A city may require multiple sequential HTTP requests. Candidate timestamps include:
+### Options considered
 
-* start of the first request;
-* completion of the final request;
-* each network's response time;
-* oldest station timestamp;
-* newest station timestamp.
+- count all provider-reported vehicles;
+- count station totals only;
+- count bicycles according to each observed representation;
+- add station subtype fields to station `free_bikes`.
 
-The choice changes staleness, coverage, and hourly averages.
+### Decision
 
-### Combining fresh and cached network values
+Count:
 
-Using a newly fetched value for one network together with older cached values for the others would reduce request use, but the resulting city total would combine measurements from different instants.
+- station `free_bikes` when that network's station representation is known to represent bicycle inventory;
+- roaming `kind == "bike"`;
+- roaming `kind == "ebike"`;
+- cargo bicycles.
 
-A decision is required on whether that result is still considered one city observation.
+Exclude roaming `kind == "scooter"`. Do not separately add station `extra.normal_bikes` or `extra.ebikes` when `free_bikes` already contains them.
 
-### Meaning of “nothing new”
+Provider-specific representation differences belong in reproducible network configuration or normalization metadata, not ad-hoc string checks scattered through the algorithm. The conceptual modes are stations-only, vehicles-only, and stations-and-vehicles; exact TypeScript names are not yet implemented.
 
-Possible definitions include:
+### Consequences
 
-* unchanged city total;
-* unchanged station values;
-* unchanged provider timestamps;
-* byte-identical response;
-* an HTTP conditional-request response;
-* no material change to the service's internal metric.
+This mapping is evidence-backed but tied to observed provider semantics and needs maintenance if CityBikes changes its representations.
 
-This definition affects both adaptive polling and the redundant-fetch ratio.
+---
 
-### Meaning of a five-minute window
+## Decision 2: Network Inclusion and Semantic Mapping Rules
 
-R5 may refer to:
+### Context
 
-* fixed aligned windows such as `12:00–12:05`;
-* every rolling five-minute interval.
+Broad discovery produced 34 candidates, not all of which belong in the current bicycle metric.
 
-These interpretations permit different maximum gaps and produce different compliance values.
+### Decision
 
-### Partial multi-network fetches
+Exclude as scooter-only in the captured evidence:
 
-A decision is required for a city where some mapped networks succeed and others fail:
+- `lime-san-francisco`;
+- `bird-seattle`;
+- `lime-portland`.
 
-* reject the whole city observation;
-* store a marked partial total;
-* combine successful responses with cached values.
+Include `bird-los-angeles`, `spin-los-angeles`, and `e-cargobike-goteborg`. Spin Los Angeles is semantically relevant, but its captured source data is stale; inclusion in the mapping does not make stale data usable.
 
-Each option changes accuracy, coverage, and request behavior.
+Exclude `kotobike`. This conclusion relies on **external/operator research**, not the CityBikes capture: Kotobike states that service ended on March 31, 2026 and was integrated/rebranded into Charichari on April 1, 2026. The captured CityBikes data is frozen around that transition. Sources: [Kotobike notice, April 1](https://kotobike.jp/en/news/260401) and [Kotobike notice, February 23](https://kotobike.jp/en/news/260223).
+
+Keep Bay Wheels relevant to San Francisco, but do not count its entire regional resource as a San Francisco total. **External/operator research:** the provider's current Lyft Bike service page (formerly Bay Wheels) says the system covers San Francisco, the East Bay, and San Jose ([service page](https://www.lyft.com/bikes/bay-wheels), [service updates](https://www.lyft.com/bikes/bay-wheels/service-updates)). Bay Wheels requires a deterministic San-Francisco geographic filter before its contribution can be called a city total. The boundary representation and filter implementation remain open.
+
+Do not merge Bird Los Angeles and Spin Los Angeles merely because Bird acquired Spin. **External research:** Bird's filing records the acquisition ([SEC filing](https://www.sec.gov/Archives/edgar/data/1861449/000186144923000196/brds-20230919.htm)); LADOT material has referenced both Bird and Spin ([LADOT FAQ](https://ladot.lacity.gov/about/faq)). This does not establish that Spin Los Angeles is currently active. The documented position is that CityBikes exposes it as a distinct Los Angeles resource, no official retirement evidence comparable to Kotobike was established in this investigation, and the captured source data was about 37 days stale.
+
+After the four exclusions above (three scooter-only resources and retired Kotobike), 30 of the 34 discovered resources remain semantically relevant candidates, including regional Bay Wheels, which still needs geographic filtering. This is not equivalent to 30 requests required for every city observation.
+
+### Consequences
+
+Excluding the three currently scooter-only resources avoids spending bicycle-polling budget on resources that contributed no bicycles in the captured evidence. Provider fleet composition can change later, so a static mapping can become stale. Periodic semantic rediscovery is a production-hardening concern outside this take-home's current scope.
+
+---
+
+## Decision 3: Fetch Time vs Source Freshness
+
+### Context
+
+`fetchedAt` records when this service received an HTTP response; it does not refresh the age of the underlying provider data. The final capture includes successful responses whose provider timestamps were much older than the HTTP response.
+
+### Decision
+
+Provider/source timestamps drive freshness decisions. Re-fetching an old source state does not restart validity. A matching bicycle count with a meaningfully newer source state can still be useful information, but a matching count with unchanged source state does not renew freshness. Stale required data must not be treated as zero, and benchmark staleness must reflect provider-backed source age rather than only elapsed time since HTTP fetch.
+
+The normalized representation should preserve enough temporal evidence to reason about `oldestSourceAt`, `newestSourceAt`, and `fetchedAt`.
+
+### Consequences
+
+An exact algorithm for collapsing thousands of station and vehicle timestamps into one network validity interval is not yet selected. It must be resolved conservatively and tested. Future provider timestamps and clock skew require an explicit small policy later rather than being silently accepted.
+
+---
+
+## Decision 4: Multi-Network City Composition
+
+### Context
+
+A city can depend on multiple network resources, and those resources may be fetched at different times.
+
+### Decision
+
+- A city may combine newly fetched network measurements with cached network measurements.
+- Cached does not mean stale; a cached component may be reused only while its provider-backed validity permits it.
+- Re-fetching another network never extends a cached component's validity.
+- A complete city result is produced only when every required component has usable data and their validity intervals overlap.
+- The composed usable interval is the intersection of component validity intervals, and the total expires when the first required component expires.
+
+If a required network is missing or stale, do not treat it as zero or store the known subtotal as the official city total. An incomplete diagnostic snapshot may retain `knownFreeBikes`, `availableNetworks`, `missingNetworks`, and `complete: false`; it does not contribute to the official hourly average.
+
+The challenge's hourly `partial` flag is not a composition flag: it means hourly temporal coverage is below `0.75`.
+
+### Consequences
+
+This model is more complex than simultaneous complete refreshes and requires explicit validity intervals through the composition/aggregation boundary. The currently implemented aggregator assumes `timestamp + maxStaleness`, so composed intervals may require a later tested extension or refactor. This documentation update does not change the aggregator.
+
+---
+
+## Decision 5: R2 “Nothing New”
+
+### Decision
+
+Classify fetches conceptually as follows:
+
+1. **Availability change:** normalized bicycle availability changed.
+2. **Freshness refresh:** availability stayed the same, but provider-backed usable freshness advanced.
+3. **Redundant:** no useful semantic improvement—availability did not change, provider-backed validity did not advance, and network/city completeness did not improve.
+4. **Failure:** an HTTP, network, malformed, or invalid provider response; failures are not redundant.
+
+Raw-body hash equality and same numeric bike counts are not the definition. A same-count measurement with a newer source state may be useful, and restoring a previously unavailable or stale component is useful even if its count matches an older value.
+
+### Consequences
+
+Availability changes are a volatility signal and may shorten polling. Repeated freshness-only refreshes indicate a healthy but flat source. Repeated redundant responses indicate polling faster than useful source updates and should drive stronger backoff, while fairness prevents permanent starvation.
+
+No verified push mechanism or cache validator lets the scheduler know in advance that a request will be unchanged. R2 therefore means adaptively minimizing redundant fetches and reporting the redundant ratio honestly, not claiming zero redundancy or clairvoyance. The required benchmark denominator remains total fetches, with failures reported separately so a low redundant ratio cannot conceal a high error rate.
+
+---
+
+## Remaining Open Questions
+
+- Does R5 mean aligned five-minute windows or every rolling five-minute interval?
+- How should one normalized network validity interval be derived from many station and vehicle source timestamps?
+- What small future-timestamp and clock-skew policy is appropriate?
+- What exact deterministic geographic boundary/filter represents Bay Wheels within San Francisco?
+- Which final impossible requirement pair can be proven as required by the challenge?
+- What scheduler policy and weights are justified once the provider boundary and domain state are implemented and testable?

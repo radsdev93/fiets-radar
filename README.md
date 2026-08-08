@@ -6,61 +6,50 @@
 
 `fiets-radar` is an in-progress TypeScript service for tracking free-bike availability across the fixed list of 20 cities defined by the project specification.
 
-The completed service will:
-
-- resolve each required city to its applicable CityBikes network endpoints;
-- collect validated availability observations;
-- centrally schedule requests under the provider's runtime-reported global request budget;
-- adapt polling frequency based on observed changes without starving cities;
-- persist observations and completed hourly results;
-- calculate time-weighted hourly averages and coverage;
-- survive process termination and resume safely;
-- record and deterministically replay real API traces;
-- compare the adaptive scheduler against a fixed-interval baseline.
+The completed service will collect validated availability observations, schedule requests within the provider's runtime-reported global budget, persist results safely, calculate time-weighted hourly averages, deterministically replay recorded traces, and compare adaptive scheduling with a fixed-interval baseline.
 
 ## Current Status
 
 ### Implemented
 
 - strict TypeScript and Jest project configuration;
-- pure hourly aggregation function;
-- required golden-vector test;
-- pre-hour validity-boundary test;
-- zero-coverage regression test using `null` for an absent average.
+- pure hourly aggregation function and its golden-vector coverage;
+- no-average-versus-zero handling for uncovered hours.
 
-### Captured and under analysis
+### Provider reconnaissance and semantic analysis completed
 
-- initial provider rate-limit response headers;
-- the global network metadata response;
-- 34 candidate network responses across the 20 required cities;
-- matching header and JSON body evidence for each candidate endpoint.
+- investigated 34 candidate network resources;
+- verified V2 stations plus roaming vehicles with `?fields=stations,vehicles`;
+- empirically characterized station and vehicle shapes;
+- documented provider representation differences and stale-source cases;
+- recorded semantic mapping and composition decisions in [`DECISIONS.md`](./DECISIONS.md).
 
 ### Not yet implemented
 
-- final reproducible city-to-network mapping;
-- Zod schemas for the provider boundary;
-- CityBikes HTTP client;
-- centralized scheduler;
-- adaptive polling policy;
-- global budget controller;
-- persistent observation and hourly-result storage;
-- crash recovery;
-- recording and deterministic replay;
-- fixed-interval baseline and benchmark;
+- reproducible city/network configuration;
+- Bay Wheels San Francisco geographic filtering;
+- timestamp normalization and Zod schemas;
+- CityBikes client;
+- network normalization;
+- complete/incomplete city composition;
+- scheduler and budget controller;
+- persistence and recovery;
+- trace recording, replay, and benchmarking;
 - CLI or HTTP result exposure.
 
-## Current Architecture Boundaries
+## Intended Architecture Boundaries
 
-The implementation is being separated into independently testable concerns:
+```text
+Central scheduler + global budget
+  → provider boundary
+  → network normalization
+  → city composition
+  → persistence / aggregation
 
-- **Provider boundary:** fetch and runtime-validate untrusted CityBikes responses.
-- **Scheduler:** decide which network to request next under one global budget.
-- **Observation composition:** combine network results into city observations according to explicit timestamp and completeness rules.
-- **Aggregation:** calculate time-weighted hourly averages from persisted observations.
-- **Storage:** persist observations, results, and recovery state transactionally.
-- **Trace and benchmark:** record real responses and replay scheduling policies deterministically.
+Fetch outcomes and observed state feed back into the scheduler.
+```
 
-Only the aggregation boundary is currently implemented.
+Only the aggregation code is currently implemented. The intended provider boundary will fetch and runtime-validate untrusted CityBikes responses; the remaining boundaries are documentation and design, not runtime functionality.
 
 ## Development Requirements
 
@@ -87,8 +76,8 @@ npx tsc --noEmit
 
 ## Documentation
 
-* [`DECISIONS.md`](./DECISIONS.md): specification conflicts, interpretations, choices, and costs.
-* [`AI-USAGE.md`](./AI-USAGE.md): implementation-assistant workflow, verification, and failures.
-* [`docs/api-findings.md`](./docs/api-findings.md): measured CityBikes behavior and raw evidence excerpts.
+- [`DECISIONS.md`](./DECISIONS.md): specification conflicts, interpretations, choices, and costs.
+- [`AI-USAGE.md`](./AI-USAGE.md): implementation-assistant workflow, verification, and failures.
+- [`docs/api-findings.md`](./docs/api-findings.md): measured CityBikes behavior and captured evidence.
 
 Run instructions for the completed service, trace recorder, replay mode, and benchmark will be added as those components are implemented.

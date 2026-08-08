@@ -1,18 +1,16 @@
 # CityBikes API Findings and Captured Evidence
 
-This document contains observations measured directly from the CityBikes API.
+This document records measured CityBikes behavior. Broad provider reconnaissance was completed on August 7, 2026. It distinguishes captured API evidence, semantic conclusions that can be drawn directly from that evidence, and architectural decisions, which belong in [`DECISIONS.md`](../DECISIONS.md).
 
-Claims are limited to what the captured responses demonstrate. Unresolved behavior is identified as unresolved rather than inferred from field names.
+All counts, shapes, and examples below are empirical observations from the described captures, not permanent provider guarantees.
 
-> **Revision note — August 6, 2026:** An earlier version incorrectly described the reported hourly quota as a separately enforced five-minute quota and described all candidate mappings as exact city matches. This revision separates measured provider behavior from derived averages and records the two provisional city aliases explicitly.
+## 1. Rate-Limit Evidence
 
-## 1. Reported Request Budget
+### Original header capture
 
-**Date captured:** August 5, 2026
-**Endpoint:** `GET https://api.citybik.es/v2/networks`
-**Capture method:** Postman response-header inspection
-
-### Raw evidence
+- **Date captured:** August 5, 2026
+- **Endpoint:** `GET https://api.citybik.es/v2/networks`
+- **Capture method:** Postman response-header inspection
 
 ```http
 content-type: application/json
@@ -28,246 +26,200 @@ access-control-allow-origin: *
 via: kong/3.5.0
 ```
 
-### What this response demonstrates
+This response reported a limit of `300`, remaining requests of `298`, reset value `3021`, and an explicitly named hourly-limit header. It did not by itself establish the reset semantics, burst behavior, a separate five-minute quota, `429` behavior, or retry accounting. Dividing an hourly limit by twelve is an average allocation, not evidence of a separately enforced five-minute quota.
 
-At the captured instant, the provider reported:
+### Targeted V2 and GBFS semantic capture
 
-* limit: `300`;
-* remaining requests: `298`;
-* reset value: `3021`;
-* an explicitly named hourly limit header: `x-ratelimit-limit-hour`.
+A run beginning around `2026-08-07T03:15Z` made 154 requests. All returned HTTP `200`. The remaining-budget counter decreased exactly once per request, approximately `298 → 145`; both V2 and GBFS calls consumed the same global budget. `ratelimit-reset` tracked the next UTC hour boundary within a few seconds.
 
-The service must read the current values from response headers at runtime. The observed number `300` must not become an assumed permanent constant.
+No `ETag`, `Last-Modified`, `Cache-Control`, or `Age` header was observed across these responses. This absence is limited to the captured sample and does not prove that the provider can never emit cache validators.
 
-### What this response does not demonstrate
+### V2 field-selection experiment
 
-This single response does not establish:
+A run beginning around `2026-08-07T03:56Z` made 25 requests, all HTTP `200`, with remaining budget approximately `144 → 120`. The six tested representative networks were `divvy`, `bird-los-angeles`, `spin-san-francisco`, `lime-seattle`, `callabike-berlin`, and `bay-wheels`.
 
-* whether the limit uses a fixed or rolling hour;
-* whether burst requests are permitted;
-* whether there is an additional minute or five-minute quota;
-* the exact interpretation of `ratelimit-reset`;
-* the shape of a `429` response;
-* whether all endpoints return identical rate-limit headers;
-* how failed or retried requests change the remaining value.
+For every one:
 
-Dividing 300 requests by 12 five-minute periods gives an average allocation of 25 requests per five minutes. It is not evidence that 25 is a separately enforced five-minute limit.
+- the normal `/v2/networks/{id}` response exposed stations but no `vehicles`;
+- `?fields=stations` returned stations;
+- `?fields=vehicles` returned vehicles;
+- `?fields=stations,vehicles` returned both;
+- selected arrays matched the corresponding arrays from the other field-selection variants in that capture.
 
-Repeated captures and controlled comparisons are still required.
+The experiment demonstrates that both station and roaming-vehicle data can be obtained from V2 in one request using `?fields=stations,vehicles`. GBFS was therefore not required to obtain those fields during the investigation.
 
----
+## 2. Candidate Resources and Final V2 Capture
 
-## 2. Global Network Discovery
+Global discovery produced 34 candidate resources for the 20 required cities. The initial mapping used `network.location.city` and `network.location.country`; `bay-wheels` and `kotobike` were provisional aliases investigated alongside exact matches.
 
-**Date captured:** August 5, 2026
-**Endpoint:** `GET https://api.citybik.es/v2/networks`
+### Candidate discovery mapping
 
-The global endpoint contains network metadata such as:
+| Required city | Country | Candidate network IDs | Discovery status |
+| --- | --- | --- | --- |
+| Barcelona | ES | `ambici-amb`, `bicing` | exact |
+| Madrid | ES | `bicimad` | exact |
+| Valencia | ES | `valenbisi` | exact |
+| Bilbao | ES | `bilbon-bizi`, `bizkaibizi-bilbao` | exact |
+| Paris | FR | `velib` | exact |
+| London | GB | `santander-cycles` | exact |
+| New York, NY | US | `citi-bike-nyc` | exact |
+| Chicago, IL | US | `divvy` | exact |
+| Los Angeles, CA | US | `bird-los-angeles`, `metro-bike-share`, `spin-los-angeles` | exact |
+| San Francisco, CA | US | `lime-san-francisco`, `spin-san-francisco`, `bay-wheels` | two exact, one provisional alias |
+| Seattle, WA | US | `bird-seattle`, `lime-seattle` | exact |
+| Portland, OR | US | `biketown`, `lime-portland` | exact |
+| Berlin | DE | `callabike-berlin`, `nextbike-berlin` | exact |
+| Köln | DE | `callabike-koln`, `kvb-rad-koln` | exact |
+| München | DE | `callabike-munchen`, `nextbike-myradl` | exact |
+| Lisbon | PT | `gira` | exact |
+| Toronto, ON | CA | `bixi-toronto` | exact |
+| Montréal, QC | CA | `bixi-montreal` | exact |
+| 京都府 (Kyoto) | JP | `docomo-cycle-kyoto`, `hellocycling-kyoto`, `kotobike` | two exact, one provisional alias |
+| Göteborg | SE | `e-cargobike-goteborg`, `styr-staell-goeteborg` | exact |
 
-* network ID;
-* network name;
-* location city;
-* location country;
-* network-specific endpoint path.
+This is the candidate discovery mapping, not the final production mapping. Later semantic inclusion and exclusion decisions are recorded in [`DECISIONS.md`](../DECISIONS.md). The eventual production mapping must be represented reproducibly in configuration rather than reconstructed from prose.
 
-It does not contain the live station-level availability needed to calculate free-bike observations. Individual network endpoints must be fetched for live data.
-
----
-
-## 3. Candidate Mapping for the 20 Required Cities
-
-The mapping was initially produced by matching the required city and country values against `network.location.city` and `network.location.country` in the global response.
-
-That process yielded 32 exact city-and-country matches.
-
-Two additional networks were included provisionally for investigation because their location strings appear to refer to the required location but do not match it exactly:
-
-* `bay-wheels`
-
-  * required city: `San Francisco, CA`
-  * provider city: `San Francisco Bay Area, CA`
-* `kotobike`
-
-  * required city: `京都府 (Kyoto)`
-  * provider city: `京都 (Kyoto)`
-
-This creates a capture set of 34 candidate endpoints.
-
-| Required city     | Country | Candidate network IDs                                      | Mapping status                   |
-| ----------------- | ------- | ---------------------------------------------------------- | -------------------------------- |
-| Barcelona         | ES      | `ambici-amb`, `bicing`                                     | exact                            |
-| Madrid            | ES      | `bicimad`                                                  | exact                            |
-| Valencia          | ES      | `valenbisi`                                                | exact                            |
-| Bilbao            | ES      | `bilbon-bizi`, `bizkaibizi-bilbao`                         | exact                            |
-| Paris             | FR      | `velib`                                                    | exact                            |
-| London            | GB      | `santander-cycles`                                         | exact                            |
-| New York, NY      | US      | `citi-bike-nyc`                                            | exact                            |
-| Chicago, IL       | US      | `divvy`                                                    | exact                            |
-| Los Angeles, CA   | US      | `bird-los-angeles`, `metro-bike-share`, `spin-los-angeles` | exact                            |
-| San Francisco, CA | US      | `lime-san-francisco`, `spin-san-francisco`, `bay-wheels`   | two exact, one provisional alias |
-| Seattle, WA       | US      | `bird-seattle`, `lime-seattle`                             | exact                            |
-| Portland, OR      | US      | `biketown`, `lime-portland`                                | exact                            |
-| Berlin            | DE      | `callabike-berlin`, `nextbike-berlin`                      | exact                            |
-| Köln              | DE      | `callabike-koln`, `kvb-rad-koln`                           | exact                            |
-| München           | DE      | `callabike-munchen`, `nextbike-myradl`                     | exact                            |
-| Lisbon            | PT      | `gira`                                                     | exact                            |
-| Toronto, ON       | CA      | `bixi-toronto`                                             | exact                            |
-| Montréal, QC      | CA      | `bixi-montreal`                                            | exact                            |
-| 京都府 (Kyoto)       | JP      | `docomo-cycle-kyoto`, `hellocycling-kyoto`, `kotobike`     | two exact, one provisional alias |
-| Göteborg          | SE      | `e-cargobike-goteborg`, `styr-staell-goeteborg`            | exact                            |
-
-### Current conclusion
-
-The 34 endpoints form a **candidate capture set**, not yet a final production mapping.
-
-Before the mapping is finalized, the evidence matrix must determine:
-
-* whether each endpoint represents bicycles relevant to `free_bikes`;
-* whether some endpoints represent scooters, cargo bikes, or another vehicle type;
-* whether multiple networks overlap or duplicate the same physical inventory;
-* whether the two manual aliases are geographically and semantically justified;
-* whether a network with no stations should remain in the mapping.
-
-The final mapping must be committed in a reproducible form rather than reconstructed from prose alone.
-
----
-
-## 4. Capture Inventory
-
-**Date captured:** August 6, 2026
-**Endpoint pattern:** `GET https://api.citybik.es/v2/networks/{id}`
-
-The reconnaissance script generated one header file and one body file for every candidate network.
-
-### Inventory results
-
-* candidate network IDs: 34;
-* header files: 34;
-* JSON body files: 34;
-* total files: 68;
-* missing header/body pairs: none;
-* captured HTTP `200` responses: 34;
-* bodies that parsed as JSON: 34;
-* bodies containing a top-level `network` object with a `stations` array: 34.
-
-### Scope of this conclusion
-
-This inventory confirms only the common root shape of the captured responses:
+A final capture beginning around `2026-08-07T04:11Z` made exactly 34 V2 requests, one per candidate resource:
 
 ```text
-response
-└── network
-    └── stations[]
+/v2/networks/{id}?fields=stations,vehicles
 ```
 
-It does not yet prove that every station has:
+All 34 returned HTTP `200`; remaining budget changed `299 → 266`. The raw evidence consisted of 34 headers and 34 bodies, and the generated SHA-256 checksum file was verified against all 68 raw evidence files.
 
-* an `id`;
-* a numeric `free_bikes`;
-* a `timestamp`;
-* the same timestamp format;
-* non-negative counts;
-* a consistent interpretation of provider-specific fields.
+The final snapshot contained 15,524 station objects and 40,386 roaming vehicle objects.
 
-Those questions belong to the cross-network evidence matrix.
+### Observed object shapes
 
----
+Across this final capture, station objects used:
 
-## 5. Example Network Response
+- `id`: string;
+- `name`: string;
+- `latitude`: number;
+- `longitude`: number;
+- `timestamp`: string;
+- `free_bikes`: non-negative integer;
+- `empty_slots`: integer or `null`;
+- `extra`: object.
 
-The following excerpt was captured from `bay-wheels_body.json`:
+No observed station `free_bikes` value was `null`, a string, negative, or fractional.
 
-```json
-{
-  "network": {
-    "id": "bay-wheels",
-    "name": "Bay Wheels",
-    "stations": [
-      {
-        "empty_slots": 11,
-        "extra": {
-          "address": "Harmon St at Adeline St",
-          "last_updated": 1698150453,
-          "renting": 1,
-          "returning": 1,
-          "uid": "1732958045763567406"
-        },
-        "free_bikes": 4,
-        "id": "d0e8f4f1834b7b33a3faf8882f567ab8",
-        "timestamp": "2026-08-06T18:41:20.123Z"
-      }
-    ]
-  }
-}
+Vehicle objects used:
+
+- `id`: string;
+- `latitude`: number;
+- `longitude`: number;
+- `timestamp`: string;
+- `kind`: string;
+- `extra`: object.
+
+Observed kinds were only `bike`, `ebike`, and `scooter`. Their totals across 40,386 captured vehicles were 5,586 bikes, 6,736 ebikes, and 28,064 scooters.
+
+## 3. Observed Representation Categories
+
+The 34 candidates empirically fell into three useful representation groups. These are observed categories, not yet TypeScript implementation types.
+
+### Stations only (17)
+
+`ambici-amb`, `bicing`, `bicimad`, `valenbisi`, `bilbon-bizi`, `bizkaibizi-bilbao`, `velib`, `santander-cycles`, `citi-bike-nyc`, `metro-bike-share`, `gira`, `bixi-toronto`, `bixi-montreal`, `docomo-cycle-kyoto`, `hellocycling-kyoto`, `kotobike`, and `e-cargobike-goteborg`.
+
+### Vehicles only / synthetic-or-empty station representation (7)
+
+`bird-los-angeles`, `spin-los-angeles`, `lime-san-francisco`, `spin-san-francisco`, `bird-seattle`, `lime-seattle`, and `lime-portland`.
+
+### Stations plus vehicles (10)
+
+`divvy`, `bay-wheels`, `biketown`, `callabike-berlin`, `nextbike-berlin`, `callabike-koln`, `kvb-rad-koln`, `callabike-munchen`, `nextbike-myradl`, and `styr-staell-goeteborg`.
+
+## 4. Representation Evidence
+
+### Lime
+
+Representative final-snapshot values show why a synthetic station cannot be read as a bicycle-only total:
+
+- `lime-san-francisco` had one synthetic station with approximately 2,837 free bikes and approximately 2,838 scooter vehicles; no bicycle vehicles were observed.
+- `lime-portland` had one synthetic station with `free_bikes = 2,094` and 2,094 scooter vehicles; no bicycle vehicles were observed.
+- `lime-seattle` had one synthetic station with approximately 13,337 free bikes and 3,543 ebikes plus 9,780 scooters. The small difference between the station aggregate and vehicle count is only a temporal observation: the objects came from the same HTTP response or nearby provider state. The capture does not establish an internal provider implementation.
+
+The evidence supports two conclusions: typed roaming vehicles are necessary to distinguish bicycles from scooters, and adding a Lime synthetic station to typed vehicles would double count part of the fleet.
+
+### Bird and Spin
+
+Representative final-capture facts:
+
+- `bird-los-angeles`: stations empty; 14 ebikes and 8,035 scooters; examined provider timestamps were fresh.
+- `spin-los-angeles`: stations empty; 28 ebikes and 8 scooters; provider data remained approximately 37 days old across repeated reconnaissance.
+- `spin-san-francisco`: stations empty; 112 ebikes and 3,033 scooters.
+- `bird-seattle`: stations empty; 0 bicycles and 1 scooter.
+
+These payloads do not establish operator or business status.
+
+### Hybrid inventory and double counting
+
+Some resources expose both station inventory and roaming bicycle inventory. In the final snapshot, `divvy` reported approximately 6,374 station free bikes, 1,976 roaming ebikes, and 993 roaming scooters. `nextbike-berlin` reported approximately 1,737 station free bikes and 3,310 roaming bikes.
+
+For `nextbike-berlin`, `nextbike-myradl`, `kvb-rad-koln`, and `styr-staell-goeteborg`, analyzed station-bike UID sets and roaming-vehicle UID sets were disjoint in this capture. The number of station bike UIDs also matched the station `free_bikes` total in the examined data. This supports separate station and roaming inventories in those responses; it is not a universal provider guarantee.
+
+### Station e-bike breakdown
+
+For providers where both `extra.normal_bikes` and `extra.ebikes` were present for all examined stations, the capture satisfied:
+
+```text
+free_bikes = normal_bikes + ebikes
 ```
 
-This sample demonstrates that this particular response includes:
+across 3,402 examined stations. Adding `extra.ebikes` on top of station `free_bikes` would double count for those providers.
 
-* `network.id`;
-* `network.name`;
-* `network.stations`;
-* station `id`;
-* station `free_bikes`;
-* station `timestamp`;
-* provider-specific nested metadata under `extra`.
+## 5. Timestamp and Source-Freshness Evidence
 
-It does not demonstrate that those fields exist with the same types in every other network.
+The final capture contained 15,524 station timestamps plus 40,386 vehicle timestamps, for 55,910 timestamps. All used the unusual V2 form ending in `+00:00Z`, for example:
 
-The difference between `extra.last_updated` and the station-level `timestamp` also shows that a timestamp-like field cannot be selected based only on its name. Its meaning must be investigated before it is used for observation validity.
+```text
+2026-08-07T04:11:31.603538+00:00Z
+```
 
-The final Zod schema will be designed after the complete evidence matrix is produced.
+This is observed CityBikes V2 behavior across the final evidence set. The provider boundary must not assume that a strict standard ISO parser accepts it. Parsing and normalization behavior still needs an actual Node 24 runtime test before an implementation claim is made.
 
----
+Approximate ages of the newest provider data in this snapshot were:
 
-## 6. Captured Response-Size Variability
+| Resource | Approximate age |
+| --- | ---: |
+| `valenbisi` | 48.8 days |
+| `spin-los-angeles` | 37.2 days |
+| `callabike-berlin` | 18.9 minutes |
+| `callabike-koln` | 18.9 minutes |
+| `callabike-munchen` | 19.0 minutes |
+| `docomo-cycle-kyoto` | 2.8 hours |
+| `kotobike` | 128.1 days |
 
-Body sizes were measured from the raw captured files.
+Other captured resources had much fresher provider timestamps. The supported conclusion is limited: a successful HTTP response can contain provider data much older than the HTTP response itself. The architectural freshness rule is recorded in `DECISIONS.md`.
 
-| Network         |       Body size |
-| --------------- | --------------: |
-| `bird-seattle`  |       303 bytes |
-| `bicing`        |   150,229 bytes |
-| `velib`         |   654,809 bytes |
-| `citi-bike-nyc` | 1,268,901 bytes |
+## 6. Geographic Evidence
 
-Across the current capture:
+Captured Bay Wheels coordinates ranged approximately from latitude `37.309` to `37.885` and longitude `-122.511` to `-121.864`. The resource therefore covers a geography much wider than a single compact San Francisco city area, consistent with its provider location label, `San Francisco Bay Area, CA`.
 
-* smallest body: `bird-seattle_body.json`, 303 bytes;
-* largest body: `citi-bike-nyc_body.json`, 1,268,901 bytes.
+An exact `network.location.city` match also does not prove that every station lies inside a municipal boundary: a Bixi Montréal capture included at least one geographically distant station. This is a limitation of metadata matching, not evidence for a general GIS filtering implementation.
 
-### Conclusion supported by the evidence
+## 7. Payload Size
 
-Payload sizes vary substantially by network.
+One complete 34-network final round using `?fields=stations,vehicles` transferred approximately 15.4 MiB of JSON bodies.
 
-The client should avoid retaining raw provider objects after producing the validated internal result, especially during recording or replay across many requests.
+| Resource | Approximate body size |
+| --- | ---: |
+| `lime-seattle` | 2.93 MB |
+| `bird-los-angeles` | 2.05 MB |
+| `divvy` | 1.81 MB |
+| `citi-bike-nyc` | 1.27 MB |
+| `nextbike-berlin` | 0.94 MB |
 
-These byte counts alone do not prove that JSON parsing or Zod validation creates a material Node.js event-loop problem. Parsing and validation cost must be measured before introducing performance-specific complexity.
+Selecting vehicles in the same V2 request does not cost an additional provider request, but it can materially increase transferred bytes, parse work, validation work, and trace size. These measurements do not establish a Node event-loop bottleneck.
 
----
+## 8. Reconnaissance Status
 
-## 7. Analysis Still Required
+Broad provider reconnaissance is considered complete. Future real-API calls should target a specific unresolved implementation question rather than repeat another broad sweep.
 
-The next evidence pass must record, for each candidate network:
+Remaining unknown provider behavior includes:
 
-* HTTP status;
-* body size;
-* station count;
-* whether `free_bikes` is always present;
-* all observed `free_bikes` types;
-* null, negative, fractional, or malformed values;
-* station ID presence and uniqueness;
-* station timestamp presence and format;
-* minimum and maximum timestamps in one response;
-* whether the response appears to represent bicycles, scooters, cargo bikes, or mixed vehicles;
-* rate-limit header presence and exact names;
-* caching headers such as `ETag` and `Last-Modified`;
-* any empty or semantically unusual response.
-
-Additional repeated fetches are required to investigate:
-
-* what counts as an upstream change;
-* whether station timestamps advance when counts remain unchanged;
-* whether conditional requests are supported;
-* how remaining-budget headers change;
-* reset behavior;
-* error and `429` response behavior.
+- exact `429` response behavior has not been intentionally triggered;
+- failed and retried request accounting has not been deliberately tested;
+- no cache validators were observed, but their absence in the captured sample is not proof that the provider can never emit them.
