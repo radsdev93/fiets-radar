@@ -70,7 +70,31 @@ R6 remains a hard invariant. The earlier proof must not be replaced with another
 
 ### Consequences
 
-The scheduler must not issue a request unless the runtime budget state indicates that it is safe. Benchmarking must report actual R5 compliance rather than claiming it from the design. It must also report actual request accounting, including retries and failures.
+After runtime budget state has been established, the scheduler must not issue a request unless that state indicates that it is safe. Benchmarking must report actual R5 compliance rather than claiming it from the design. It must also report actual request accounting, including retries and failures.
+
+### R6 bootstrap ambiguity and fail-closed policy
+
+R6 requires the service to discover the provider budget at runtime from the API itself while also treating that budget as a hard ceiling. The first response headers cannot be inspected until a request has already been sent, so the specification does not define how the very first budget-discovery request is authorized.
+
+The implementation will treat one initial request as an unavoidable **bootstrap request** when no usable runtime budget state exists.
+
+Once that response is available:
+
+- the bootstrap request counts as a real provider request;
+- the controller initializes from the provider-reported post-request `remaining` value rather than assuming `limit - 1`;
+- if the response reports `remaining = 0`, no further requests are permitted until the reported reset;
+- missing, malformed, or contradictory budget headers leave the budget unknown and the service fails closed rather than continuing to poll;
+- a transport failure that produces no usable response headers also leaves the budget unknown, so the service must not blindly retry startup requests under the claim that R6 is still proven.
+
+This is a conservative resolution, not a proof that the bootstrap request itself can never encounter an already-exhausted externally shared provider budget. No pre-request mechanism was established that can reveal the current remaining budget without consuming a request. The limitation must therefore be stated rather than hidden behind an assumed configured limit.
+
+The current rate-limit boundary parses the captured primary headers (`ratelimit-limit`, `ratelimit-remaining`, and `ratelimit-reset`) and checks the optional hourly compatibility headers for consistency. Request authorization and reset-time handling belong to the later global budget controller.
+
+### Consequences and cost
+
+This policy gives R6 a clear operational meaning after discovery and prevents retries or normal polling from proceeding on guessed budget state. Its cost is availability: a malformed bootstrap response or transport failure can stop polling until a later explicit recovery path is defined.
+
+The bootstrap ambiguity is recorded as an underspecified operational edge of R6. It is **not** being claimed as the assignment's required impossible requirement pair; that proof remains open.
 
 ---
 
