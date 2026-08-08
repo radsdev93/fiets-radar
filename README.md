@@ -14,7 +14,8 @@ The completed service will collect validated availability observations, schedule
 
 - strict TypeScript and Jest project configuration;
 - pure hourly aggregation function and its golden-vector coverage;
-- no-average-versus-zero handling for uncovered hours.
+- no-average-versus-zero handling for uncovered hours;
+- strict CityBikes timestamp parsing for the captured UTC forms, including the provider's `+00:00Z` quirk.
 
 ### Provider reconnaissance and semantic analysis completed
 
@@ -28,7 +29,7 @@ The completed service will collect validated availability observations, schedule
 
 - reproducible city/network configuration;
 - Bay Wheels San Francisco geographic filtering;
-- timestamp normalization and Zod schemas;
+- CityBikes Zod response schemas and timestamp integration at the provider boundary;
 - CityBikes client;
 - network normalization;
 - complete/incomplete city composition;
@@ -49,7 +50,7 @@ Central scheduler + global budget
 Fetch outcomes and observed state feed back into the scheduler.
 ```
 
-Only the aggregation code is currently implemented. The intended provider boundary will fetch and runtime-validate untrusted CityBikes responses; the remaining boundaries are documentation and design, not runtime functionality.
+Only the aggregation logic and standalone CityBikes timestamp parser are currently implemented. The intended provider boundary will fetch and runtime-validate untrusted CityBikes responses and integrate the timestamp parser; the remaining boundaries are documentation and design, not runtime functionality.
 
 ## Development Requirements
 
