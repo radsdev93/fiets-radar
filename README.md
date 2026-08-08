@@ -19,7 +19,11 @@ The completed service will collect validated availability observations, schedule
 - runtime-validated CityBikes V2 response boundary with Zod;
 - provider timestamp transformation through the strict CityBikes timestamp adapter;
 - strict runtime parsing and consistency checks for CityBikes rate-limit headers;
-- thin CityBikes V2 HTTP client with injected fetch, fail-closed budget validation, JSON decoding as untrusted data, and discriminated failure results.
+- thin CityBikes V2 HTTP client with injected fetch, fail-closed budget validation, JSON decoding as untrusted data, and discriminated failure results;
+- reproducible configuration for the 20 required cities and 30 selected network resources;
+- evidence-backed network normalization for station-only, vehicle-only, and combined representations;
+- source-time validity intervals that do not refresh stale provider state from HTTP fetch time;
+- deterministic Bay Wheels filtering for the San Francisco slice.
 
 ### Provider reconnaissance and semantic analysis completed
 
@@ -31,9 +35,6 @@ The completed service will collect validated availability observations, schedule
 
 ### Not yet implemented
 
-- reproducible city/network configuration;
-- Bay Wheels San Francisco geographic filtering;
-- network normalization;
 - complete/incomplete city composition;
 - scheduler and budget controller;
 - persistence and recovery;
@@ -52,7 +53,7 @@ Central scheduler + global budget
 Fetch outcomes and observed state feed back into the scheduler.
 ```
 
-The aggregation logic and the core CityBikes provider boundary are implemented: strict timestamp parsing, Zod response validation, rate-limit header parsing, and an injected-fetch V2 HTTP client. Request-budget control, retries, downstream network normalization, city composition, persistence, and scheduling are not yet implemented.
+The aggregation logic, core CityBikes provider boundary, reproducible city/network configuration, and network normalization are implemented. The normalizer applies explicit representation modes, bicycle-kind semantics, geographic filtering where configured, and conservative source-time validity intervals. City composition, request-budget control, adaptive scheduling, persistence/recovery, deterministic replay/benchmarking, and result exposure are not yet implemented.
 
 ## Development Requirements
 

@@ -215,7 +215,16 @@ Include `bird-los-angeles`, `spin-los-angeles`, and `e-cargobike-goteborg`. Spin
 
 Exclude `kotobike`. This conclusion relies on **external/operator research**, not the CityBikes capture: Kotobike states that service ended on March 31, 2026 and was integrated/rebranded into Charichari on April 1, 2026. The captured CityBikes data is frozen around that transition. Sources: [Kotobike notice, April 1](https://kotobike.jp/en/news/260401) and [Kotobike notice, February 23](https://kotobike.jp/en/news/260223).
 
-Keep Bay Wheels relevant to San Francisco, but do not count its entire regional resource as a San Francisco total. **External/operator research:** the provider's current Lyft Bike service page (formerly Bay Wheels) says the system covers San Francisco, the East Bay, and San Jose ([service page](https://www.lyft.com/bikes/bay-wheels), [service updates](https://www.lyft.com/bikes/bay-wheels/service-updates)). Bay Wheels requires a deterministic San-Francisco geographic filter before its contribution can be called a city total. The boundary representation and filter implementation remain open.
+Keep Bay Wheels relevant to San Francisco, but do not count its entire regional resource as a San Francisco total. **External/operator research:** the provider's current Lyft Bike service page (formerly Bay Wheels) says the system covers San Francisco, the East Bay, and San Jose ([service page](https://www.lyft.com/bikes/bay-wheels), [service updates](https://www.lyft.com/bikes/bay-wheels/service-updates)).
+
+For this take-home, the reproducible configuration applies the following inclusive deterministic bounding box to both Bay Wheels station and vehicle records:
+
+```text
+latitude:   37.708 .. 37.833
+longitude: -122.515 .. -122.356
+```
+
+This is an explicit engineering approximation, not a claim that the rectangle is the exact San Francisco municipal polygon. It keeps the regional resource usable without introducing a GIS dependency under the challenge's time constraint. A production implementation should replace this approximation with an authoritative geographic boundary if exact municipal inclusion is required.
 
 Do not merge Bird Los Angeles and Spin Los Angeles merely because Bird acquired Spin. **External research:** Bird's filing records the acquisition ([SEC filing](https://www.sec.gov/Archives/edgar/data/1861449/000186144923000196/brds-20230919.htm)); LADOT material has referenced both Bird and Spin ([LADOT FAQ](https://ladot.lacity.gov/about/faq)). This does not establish that Spin Los Angeles is currently active. The documented position is that CityBikes exposes it as a distinct Los Angeles resource, no official retirement evidence comparable to Kotobike was established in this investigation, and the captured source data was about 37 days stale.
 
@@ -237,11 +246,43 @@ Excluding the three currently scooter-only resources avoids spending bicycle-pol
 
 Provider/source timestamps drive freshness decisions. Re-fetching an old source state does not restart validity. A matching bicycle count with a meaningfully newer source state can still be useful information, but a matching count with unchanged source state does not renew freshness. Stale required data must not be treated as zero, and benchmark staleness must reflect provider-backed source age rather than only elapsed time since HTTP fetch.
 
-The normalized representation should preserve enough temporal evidence to reason about `oldestSourceAt`, `newestSourceAt`, and `fetchedAt`.
+Network normalization now preserves:
+
+- `oldestSourceAt`;
+- `newestSourceAt`;
+- `fetchedAt`;
+- `validFrom`;
+- `validUntil`.
+
+For all source records included by the configured representation after any geographic filter:
+
+```text
+oldestSourceAt = minimum source timestamp
+newestSourceAt = maximum source timestamp
+
+validFrom  = newestSourceAt
+validUntil = oldestSourceAt + maxStaleness
+```
+
+This is the intersection of the individual source validity windows. A normalized network total is usable only when:
+
+```text
+validFrom < validUntil
+```
+
+A spread equal to or greater than `maxStaleness` therefore yields no overlapping validity interval.
+
+`fetchedAt` is preserved as receipt metadata but never extends provider-backed validity. A response fetched after `validUntil` may still normalize into a historical snapshot whose usable interval is already in the past.
+
+For modes that use roaming vehicles, included vehicle timestamps participate in the represented source state even when a known scooter contributes zero bicycles. Unknown included vehicle kinds fail normalization rather than being silently treated as zero. For station-only mode, vehicle records are outside the configured representation and do not affect counting or source-time reduction.
 
 ### Consequences
 
-An exact algorithm for collapsing thousands of station and vehicle timestamps into one network validity interval is not yet selected. It must be resolved conservatively and tested. Future provider timestamps and clock skew require an explicit small policy later rather than being silently accepted.
+This rule is intentionally conservative. A single old record inside the configured representation can shorten or eliminate the network's common validity interval. That may reduce coverage, but it avoids presenting a total as fresh when its component source observations do not overlap under the challenge's own staleness semantics. The benchmark will expose the practical cost of this choice.
+
+An explicitly missing `vehicles` property fails closed for modes that require vehicles. An explicitly present empty vehicle array is distinct from a missing array; for `stations-and-vehicles`, normalization may still proceed when included station records provide source-time evidence.
+
+Future provider timestamps and clock skew still require an explicit small policy rather than being silently accepted.
 
 ---
 
@@ -293,8 +334,6 @@ No verified push mechanism or cache validator lets the scheduler know in advance
 ## Remaining Open Questions
 
 - Does R5 mean aligned five-minute windows or every rolling five-minute interval?
-- How should one normalized network validity interval be derived from many station and vehicle source timestamps?
 - What small future-timestamp and clock-skew policy is appropriate?
-- What exact deterministic geographic boundary/filter represents Bay Wheels within San Francisco?
 - Which final impossible requirement pair can be proven as required by the challenge?
-- What scheduler policy and weights are justified once the provider boundary and domain state are implemented and testable?
+- What scheduler policy and weights are justified once city composition and persisted domain state are implemented and testable?
