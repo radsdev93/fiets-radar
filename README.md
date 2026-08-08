@@ -18,7 +18,8 @@ The completed service will collect validated availability observations, schedule
 - strict CityBikes timestamp parsing for the captured UTC forms, including the provider's `+00:00Z` quirk;
 - runtime-validated CityBikes V2 response boundary with Zod;
 - provider timestamp transformation through the strict CityBikes timestamp adapter;
-- strict runtime parsing and consistency checks for CityBikes rate-limit headers.
+- strict runtime parsing and consistency checks for CityBikes rate-limit headers;
+- thin CityBikes V2 HTTP client with injected fetch, fail-closed budget validation, JSON decoding as untrusted data, and discriminated failure results.
 
 ### Provider reconnaissance and semantic analysis completed
 
@@ -32,7 +33,6 @@ The completed service will collect validated availability observations, schedule
 
 - reproducible city/network configuration;
 - Bay Wheels San Francisco geographic filtering;
-- CityBikes HTTP client;
 - network normalization;
 - complete/incomplete city composition;
 - scheduler and budget controller;
@@ -52,7 +52,7 @@ Central scheduler + global budget
 Fetch outcomes and observed state feed back into the scheduler.
 ```
 
-The aggregation logic, strict CityBikes timestamp parser, Zod response-validation boundary, and rate-limit header parser are implemented. The provider boundary can now validate the CityBikes response fields the application consumes and interpret captured runtime budget metadata, but HTTP fetching, request-budget control, retries, and downstream normalization are not yet implemented.
+The aggregation logic and the core CityBikes provider boundary are implemented: strict timestamp parsing, Zod response validation, rate-limit header parsing, and an injected-fetch V2 HTTP client. Request-budget control, retries, downstream network normalization, city composition, persistence, and scheduling are not yet implemented.
 
 ## Development Requirements
 
