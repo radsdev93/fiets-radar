@@ -77,7 +77,7 @@ Global discovery produced 34 candidate resources for the 20 required cities. The
 | 京都府 (Kyoto) | JP | `docomo-cycle-kyoto`, `hellocycling-kyoto`, `kotobike` | two exact, one provisional alias |
 | Göteborg | SE | `e-cargobike-goteborg`, `styr-staell-goeteborg` | exact |
 
-This is the candidate discovery mapping, not the final production mapping. Later semantic inclusion and exclusion decisions are recorded in [`DECISIONS.md`](../DECISIONS.md). The eventual production mapping must be represented reproducibly in configuration rather than reconstructed from prose.
+This is the candidate discovery mapping, not the final production mapping. Later semantic inclusion and exclusion decisions are recorded in [`DECISIONS.md`](../DECISIONS.md). The final production mapping is represented reproducibly in configuration rather than reconstructed from prose.
 
 A final capture beginning around `2026-08-07T04:11Z` made exactly 34 V2 requests, one per candidate resource:
 
@@ -117,7 +117,7 @@ Observed kinds were only `bike`, `ebike`, and `scooter`. Their totals across 40,
 
 ## 3. Observed Representation Categories
 
-The 34 candidates empirically fell into three useful representation groups. These are observed categories, not yet TypeScript implementation types.
+The 34 candidates empirically fell into three useful representation groups. These observed categories informed the implemented normalization modes: `stations-only`, `vehicles-only`, and `stations-and-vehicles`.
 
 ### Stations only (17)
 
@@ -333,4 +333,4 @@ The trace does **not** prove that those resources are permanently stale or that 
 
 Section 5 requires raw status, headers, and body for every recorded fetch. After this diagnostic run, the trace format was replaced with V2 raw recording and deterministic raw replay.
 
-The final benchmark capture is a separate dense V2 trace across Barcelona, Madrid, and Göteborg. It was still running when this documentation revision was prepared.
+The final benchmark capture is a separate dense V2 trace across Barcelona, Madrid, and Göteborg. It completed successfully with 60 complete rounds, 300 raw provider responses, and no incomplete rounds; the full replay methodology and results are documented in `docs/benchmark.md`.
