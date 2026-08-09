@@ -2,7 +2,7 @@
 
 This document describes the deterministic adaptive-versus-fixed comparison required by section 5 of the assignment.
 
-> **Status:** methodology is implemented and tested. The final V2 raw trace is still being captured at the time of this revision. The result table below must be filled from the completed trace; no benchmark result is claimed before that run exists.
+> **Status:** the final V2 raw trace has been captured successfully and the first real-trace comparison has been run. The initial adaptive heuristic wins on request usage only, ties R5 compliance, and loses the remaining measured quality metrics. That result is preserved below as pre-tuning evidence. Any scheduler correction will be replayed against the **same trace and same request budget** rather than changing the experiment after seeing the outcome.
 
 ## Purpose
 
@@ -11,6 +11,8 @@ The benchmark answers one question:
 > Under the same recorded provider behavior and the same request budget, does the adaptive scheduler make better use of requests than a dumb fixed-interval policy?
 
 The adaptive strategy is not treated as better by definition. Losses are reported as losses.
+
+The first real-trace result is intentionally kept even though it does not meet the brief's target that adaptive should beat the baseline on at least two metrics. It is evidence about the original heuristic and the reason for any later policy correction.
 
 ## Final Trace
 
@@ -76,7 +78,36 @@ npm run trace:record -- \
   --city Göteborg
 ```
 
-The recorder still obeys runtime provider budget authorization. `60 × 5 = 300` is the requested maximum number of fetches, not an assumed provider allowance.
+Recorder output:
+
+```text
+Completed rounds: 60
+Incomplete rounds: 0
+Provider requests: 300
+Output: traces/citybikes-benchmark-v2.json
+```
+
+The recorder still obeyed runtime provider budget authorization. `60 × 5 = 300` was the requested maximum number of fetches, not a hardcoded assumption about the provider allowance.
+
+### Captured trace facts
+
+| Field | Value |
+| --- | --- |
+| trace version | 2 |
+| selected cities | Barcelona, Madrid, Göteborg |
+| network resources | 5 |
+| trace rounds | 60 |
+| complete trace rounds | 60 |
+| incomplete trace rounds | 0 |
+| provider requests | 300 |
+| raw trace file size | 30,880,313 bytes (29.45 MiB) |
+| recordedAt | 2026-08-08T21:11:38.944Z |
+| first complete-round availability | 2026-08-08T23:11:56.815Z |
+| last complete-round availability | 2026-08-08T23:11:59.016Z |
+| benchmark duration | 7217.866 seconds (~2h 00m 18s) |
+| max staleness | 900 seconds |
+
+The capture completed all requested rounds with no incomplete round reported by the recorder.
 
 ## Causal Replay
 
@@ -110,7 +141,7 @@ Both runs instantiate the real `AdaptiveScheduler`.
 
 ### Adaptive
 
-The production heuristic reacts to:
+The original production heuristic used for the first real-trace run reacts to:
 
 ```text
 availability change
@@ -120,6 +151,8 @@ failure
 ```
 
 while respecting the same persistent request-budget controller and runtime sustainable pacing floor used by the service.
+
+The initial comparison below reflects that original heuristic before any evidence-driven tuning.
 
 ### Fixed baseline
 
@@ -141,6 +174,14 @@ ceil(N × D / B)
 
 Both strategies still pass every request through the same request-budget controller.
 
+For the final trace and a budget of `300`, the fixed interval is:
+
+```text
+120.298 seconds
+```
+
+That is close to the recording cadence, which avoids giving the baseline an unrealistically fast polling frequency relative to the density of the real trace.
+
 ## Same Virtual Budget
 
 The real recorder's decreasing provider headers are evidence from the recording process; they are **not** reused as the policy budget for one strategy.
@@ -156,6 +197,14 @@ remaining = requestBudget - k
 with one deterministic reset boundary at the end of the experiment.
 
 This isolates scheduler policy rather than rewarding the strategy whose request pattern happens to resemble the recorder.
+
+The first real-trace comparison uses:
+
+```text
+request budget = 300
+```
+
+That budget was chosen before observing the benchmark result. It corresponds to the 300 real fetches captured in the final trace and gives the fixed baseline a cadence close to the approximately two-minute trace density.
 
 ## Metrics
 
@@ -238,62 +287,232 @@ MAE =
 
 A missing average is never converted to zero.
 
-## Result
+## Initial Real-Trace Result — Original Adaptive Heuristic
 
-**Pending completion of the final V2 trace.**
+The first comparison was run immediately after the final trace completed, before changing the adaptive policy:
+
+```bash
+npm run benchmark -- \
+  --trace traces/citybikes-benchmark-v2.json \
+  --budget 300
+```
+
+Result:
 
 | Metric | Adaptive | Fixed | Better |
 | --- | ---: | ---: | --- |
-| requests used | pending | pending | pending |
-| mean staleness (s) | pending | pending | pending |
-| p95 staleness (s) | pending | pending | pending |
-| redundant fetch ratio | pending | pending | pending |
-| R5 window compliance | pending | pending | pending |
-| hourly-average MAE (bikes) | pending | pending | pending |
+| requests used | **255** | 295 | **Adaptive** |
+| mean staleness (s) | 179.756 | **108.275** | **Fixed** |
+| p95 staleness (s) | 292.352 | **188.385** | **Fixed** |
+| redundant fetch ratio | 0.117647 | **0.050847** | **Fixed** |
+| R5 window compliance | 1.000000 | 1.000000 | Tie |
+| hourly-average MAE (bikes) | 3.486667 | **1.850000** | **Fixed** |
 
-### Trace metadata
+Additional output:
 
-| Field | Value |
-| --- | --- |
-| selected cities | Barcelona, Madrid, Göteborg |
-| network resources | 5 |
-| trace rounds | pending |
-| complete trace rounds | pending |
-| trace duration | pending |
-| raw trace file size | pending |
-| benchmark request budget | pending |
-| fixed interval | pending |
-| evaluation tick | 30 seconds |
+| Field | Adaptive | Fixed |
+| --- | ---: | ---: |
+| staleness sample count | 723 | 723 |
+| hourly MAE sample count | 6 | 6 |
 
-## Interpretation
+The benchmark classified the outcome as:
 
-Pending the measured comparison.
+```text
+adaptive wins:
+  requests
 
-This section must state both:
+fixed wins:
+  meanStalenessSeconds
+  p95StalenessSeconds
+  redundantRatio
+  maeFreeBikes
 
-- the metrics the adaptive scheduler wins;
-- the metrics it loses or ties, and why those outcomes are plausible.
+ties:
+  r5Compliance
+```
 
-No parameter will be changed merely to manufacture two wins. If tuning is performed after the first real comparison, it will use the same recorded trace so the before/after comparison remains reproducible.
+### What the initial result shows
+
+The original adaptive policy used:
+
+```text
+255 / 295 = 86.44%
+```
+
+as many requests as the fixed baseline, saving:
+
+```text
+40 requests
+≈ 13.56%
+```
+
+while still achieving perfect rolling R5 compliance.
+
+That is a genuine adaptive benefit: the scheduler reduced upstream request consumption without sacrificing the five-minute observation requirement on this trace.
+
+However, the cost was significant:
+
+- mean provider-source staleness was materially higher;
+- p95 staleness was materially higher;
+- hourly-average MAE was higher;
+- redundant-fetch ratio was unexpectedly higher rather than lower.
+
+The result therefore does **not** support a claim that the original adaptive heuristic is better overall.
+
+It wins one metric, ties one, and loses four.
+
+## Evidence-Driven Interpretation of the Initial Loss
+
+The first real-trace run exposed a policy weakness that unit tests did not show clearly.
+
+The scheduler distinguishes semantic fetch outcomes:
+
+```text
+availability change
+freshness-only refresh
+redundant
+failure
+```
+
+That classification is useful for R2 accounting, but the original adaptive heuristic also used it directly as its volatility signal.
+
+A response such as:
+
+```text
+100 bikes @ provider source 12:00
+100 bikes @ provider source 12:02
+100 bikes @ provider source 12:04
+```
+
+is correctly classified as useful freshness evidence rather than redundant data.
+
+But repeated same-count freshness refreshes also provide a different kind of information:
+
+```text
+availability is currently flat
+```
+
+The original policy did not progressively back off from that evidence in the same way it reacts to truly redundant responses.
+
+This means two separate questions were partially conflated:
+
+```text
+Was this fetch semantically useful?       ← R2 accounting
+How volatile does this network appear?    ← R1 adaptation
+```
+
+They are related, but they are not identical.
+
+The initial policy also began unseen adaptive resources above the sustainable budget-neutral cadence rather than first observing them at that cadence and then learning whether to back off.
+
+The trace contains both relatively flat and frequently changing resources, so this distinction matters in the measured result rather than only in a synthetic test.
+
+## Tuning Policy
+
+The initial result is preserved and will not be overwritten.
+
+Any scheduler correction after this point must follow these rules:
+
+- use the exact same raw V2 trace;
+- keep the benchmark budget at `300`;
+- keep the fixed baseline unchanged;
+- keep the metric implementations unchanged;
+- change only scheduler policy justified by the observed weakness;
+- rerun the full test suite and type check;
+- report the second benchmark even if it still loses;
+- do not change parameters merely to manufacture two adaptive wins.
+
+This keeps the before/after comparison reproducible.
+
+## Post-Tuning Result
+
+**Pending.**
+
+If the adaptive heuristic is changed, the result will be recorded here rather than replacing the initial run.
+
+| Metric | Adaptive | Fixed | Better |
+| --- | ---: | ---: | --- |
+| requests used | pending | 295 | pending |
+| mean staleness (s) | pending | 108.275 | pending |
+| p95 staleness (s) | pending | 188.385 | pending |
+| redundant fetch ratio | pending | 0.050847 | pending |
+| R5 window compliance | pending | 1.000000 | pending |
+| hourly-average MAE (bikes) | pending | 1.850000 | pending |
+
+The fixed values should remain identical because the trace, budget, baseline strategy, and metrics are unchanged.
 
 ## Reproduce
 
-After the trace has been committed:
+Install dependencies and run tests:
 
 ```bash
 npm install
 npm test -- --runInBand
-
-npm run benchmark -- \
-  --trace traces/citybikes-benchmark-v2.json \
-  --budget <final-budget>
 ```
 
-The exact final budget and expected output will replace the placeholder above once the real trace completes.
+Run the recorded comparison:
+
+```bash
+npm run benchmark -- \
+  --trace traces/citybikes-benchmark-v2.json \
+  --budget 300
+```
+
+The initial original-heuristic output is:
+
+```json
+{
+  "adaptive": {
+    "requests": 255,
+    "meanStalenessSeconds": 179.75615767634847,
+    "p95StalenessSeconds": 292.352,
+    "stalenessSampleCount": 723,
+    "redundantRatio": 0.11764705882352941,
+    "r5Compliance": 1,
+    "maeFreeBikes": 3.486666666666565,
+    "maeSampleCount": 6
+  },
+  "fixed": {
+    "requests": 295,
+    "meanStalenessSeconds": 108.27536514522801,
+    "p95StalenessSeconds": 188.385,
+    "stalenessSampleCount": 723,
+    "redundantRatio": 0.05084745762711865,
+    "r5Compliance": 1,
+    "maeFreeBikes": 1.849999999999871,
+    "maeSampleCount": 6
+  },
+  "comparison": {
+    "adaptiveWins": ["requests"],
+    "fixedWins": [
+      "meanStalenessSeconds",
+      "p95StalenessSeconds",
+      "redundantRatio",
+      "maeFreeBikes"
+    ],
+    "ties": ["r5Compliance"]
+  },
+  "metadata": {
+    "selectedCities": ["Barcelona", "Madrid", "Göteborg"],
+    "traceRounds": 60,
+    "completeTraceRounds": 60,
+    "durationSeconds": 7217.866,
+    "requestBudget": 300,
+    "fixedIntervalSeconds": 120.298,
+    "evaluationTickSeconds": 30
+  }
+}
+```
+
+After an evidence-driven scheduler change, this same command will produce the post-tuning comparison and the result will be added above.
 
 ## Known Experimental Limitations
 
-- The trace covers a handful of cities and roughly a couple of hours, not every time-of-day pattern.
+- The trace covers three cities and five network resources for roughly two hours, not every city or time-of-day pattern.
 - The raw trace is ground truth for the experiment, not a claim of omniscient physical bike availability.
 - A complete trace round is exposed only when the whole sequential sweep finishes, which is intentionally conservative.
-- The benchmark compares the currently implemented heuristic, not an optimized control algorithm.
+- The trace resolution is approximately two minutes, so replay cannot provide genuinely new provider evidence at a finer real-world resolution than was recorded.
+- The benchmark budget is a deterministic experiment budget, not a simulation of every hourly provider reset observed during the live capture.
+- Only six comparable completed city-hour averages are available for MAE in this roughly two-hour, three-city trace.
+- The first comparison measures the original heuristic, not an optimized control algorithm.
+- If tuning is performed, it is evidence-driven against this same trace; that improves reproducibility but also means the trace becomes development evidence rather than a completely untouched holdout set.
