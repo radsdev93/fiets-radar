@@ -111,6 +111,7 @@ export class AdaptiveScheduler {
     failures: 0,
   };
   private isStepping = false;
+  private nextGlobalRequestAtMs = -Infinity;
 
   constructor(private readonly options: AdaptiveSchedulerOptions) {
     const networksById = new Map<string, ScheduledNetwork>();
@@ -136,14 +137,19 @@ export class AdaptiveScheduler {
     this.isStepping = true;
 
     try {
-      const materializedCities = this.materializeDueCities(this.options.clock.now());
-      const selectedNetwork = this.selectDueNetwork(this.options.clock.now());
+      const now = this.options.clock.now();
+      const materializedCities = this.materializeDueCities(now);
+      const selectedNetwork = this.selectDueNetwork(now);
 
       if (selectedNetwork === null) {
         return this.emptyStepResult("idle", materializedCities);
       }
 
-      const reservation = this.options.budget.reserve(this.options.clock.now());
+      if (!this.canIssueRequest(selectedNetwork, now)) {
+        return this.emptyStepResult("idle", materializedCities);
+      }
+
+      const reservation = this.options.budget.reserve(now);
 
       if (reservation.kind === "blocked") {
         return {
@@ -180,6 +186,8 @@ export class AdaptiveScheduler {
 
       const completionTime = this.options.clock.now();
       this.reconcileBudget(fetchResult, completionTime);
+      this.updateGlobalRequestPacing(completionTime);
+
       const usefulness = this.processFetchResult(
         selectedNetwork.config,
         fetchResult,
@@ -460,6 +468,47 @@ export class AdaptiveScheduler {
     }
   }
 
+  private canIssueRequest(
+    scheduledNetwork: ScheduledNetwork,
+    now: Date,
+  ): boolean {
+    if (this.options.pollingMode?.kind === "fixed") {
+      return true;
+    }
+
+    if (!this.schedules.has(scheduledNetwork.config.networkId)) {
+      return true;
+    }
+
+    return now.getTime() >= this.nextGlobalRequestAtMs;
+  }
+
+  private updateGlobalRequestPacing(completionTime: Date): void {
+    if (this.options.pollingMode?.kind === "fixed") {
+      return;
+    }
+
+    const state = this.options.budget.getState();
+
+    if (
+      state.kind !== "established" ||
+      state.remaining <= 0 ||
+      state.resetAt.getTime() <= completionTime.getTime()
+    ) {
+      return;
+    }
+
+    const spacingMs = Math.max(
+      1,
+      Math.ceil(
+        (state.resetAt.getTime() - completionTime.getTime()) /
+          state.remaining,
+      ),
+    );
+
+    this.nextGlobalRequestAtMs = completionTime.getTime() + spacingMs;
+  }
+
   private updateSchedule(
     config: ConfiguredNetwork,
     fetchedAt: Date,
@@ -502,14 +551,17 @@ export class AdaptiveScheduler {
     if (usefulness === "availability-change") {
       desiredIntervalMs = Math.ceil((previousIntervalMs ?? initialIntervalMs) / 2);
     } else if (usefulness === "freshness-refresh") {
-      desiredIntervalMs = previousIntervalMs !== undefined ? previousIntervalMs * 1.25 : initialIntervalMs;
+      desiredIntervalMs =
+        previousIntervalMs !== undefined
+          ? previousIntervalMs * 1.25
+          : initialIntervalMs;
     } else if (usefulness === "redundant") {
       desiredIntervalMs = (previousIntervalMs ?? initialIntervalMs) * 2;
     } else {
       desiredIntervalMs = (previousIntervalMs ?? freshnessCeilingMs) * 2;
     }
 
-    if (sustainableFloorMs !== null) {
+    if (capacityInsufficient && sustainableFloorMs !== null) {
       desiredIntervalMs = Math.max(desiredIntervalMs, sustainableFloorMs);
     }
 
@@ -573,12 +625,8 @@ export class AdaptiveScheduler {
 
     const expiryDeadlineMs =
       snapshot.validUntil.getTime() - this.expirySafetyMs();
-    const preferredDeadlineMs = Math.min(adaptiveDeadlineMs, expiryDeadlineMs);
-    const sustainableFloorMs = this.getSustainableFloorMs();
 
-    return sustainableFloorMs === null
-      ? preferredDeadlineMs
-      : Math.max(startMs + sustainableFloorMs, preferredDeadlineMs);
+    return Math.min(adaptiveDeadlineMs, expiryDeadlineMs);
   }
 
   private isUsableAt(
