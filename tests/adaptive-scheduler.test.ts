@@ -425,88 +425,6 @@ describe("AdaptiveScheduler", () => {
     );
   });
 
-  it("lets a changing network schedule below the equal-share floor while pacing requests globally", async () => {
-    const outcomes = [
-      successfulFetch("network-a", "12:00:00", 5),
-      successfulFetch("network-a", "12:00:36", 8),
-      successfulFetch("network-a", "12:01:12", 9),
-    ];
-    let fetches = 0;
-
-    await withScheduler(
-      city(["network-a"]),
-      async (scheduler, _store, budget, clock) => {
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-          usefulness: "freshness-refresh",
-        });
-
-        const firstSchedule = scheduler.getNetworkSchedule("network-a");
-
-        if (firstSchedule === null) {
-          throw new Error("Expected first schedule");
-        }
-
-        clock.setDate(firstSchedule.nextPollAt);
-
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-          usefulness: "availability-change",
-        });
-
-        const changedSchedule = scheduler.getNetworkSchedule("network-a");
-        const equalShareFloorMs = scheduler.getSustainableFloorMs();
-
-        if (changedSchedule === null || equalShareFloorMs === null) {
-          throw new Error("Expected changed schedule and sustainable floor");
-        }
-
-        expect(changedSchedule.intervalMs).toBeLessThan(equalShareFloorMs);
-
-        const budgetState = budget.getState();
-
-        if (budgetState.kind !== "established") {
-          throw new Error("Expected established budget");
-        }
-
-        const globalSpacingMs = Math.max(
-          1,
-          Math.ceil(
-            (budgetState.resetAt.getTime() - clock.now().getTime()) /
-              budgetState.remaining,
-          ),
-        );
-        const nextGlobalRequestAt = new Date(
-          clock.now().getTime() + globalSpacingMs,
-        );
-
-        clock.setDate(changedSchedule.nextPollAt);
-
-        expect(await scheduler.step()).toMatchObject({
-          kind: "idle",
-        });
-        expect(fetches).toBe(2);
-
-        clock.setDate(nextGlobalRequestAt);
-
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-        });
-        expect(fetches).toBe(3);
-      },
-      async () => {
-        fetches += 1;
-        const outcome = outcomes.shift();
-
-        if (outcome === undefined) {
-          throw new Error("No configured fetch outcome");
-        }
-
-        return outcome;
-      },
-    );
-  });
-
   it("classifies first, redundant, freshness, and availability outcomes with adaptive intervals", async () => {
     const outcomes = [
       successfulFetch("network-a", "12:00:00", 5),
@@ -758,13 +676,13 @@ describe("AdaptiveScheduler", () => {
     );
   });
 
-  it("lets expiry safety make a fetched network due before the equal-share cadence but gates the next request globally", async () => {
+  it("does not let expiry safety pull a fetched schedule below its sustainable floor", async () => {
     await withScheduler(
       city(["network-a"]),
       async (scheduler, _store, budget, clock) => {
         budget.reserve(clock.now());
         budget.observeRateLimit(
-          { limit: 2, remaining: 2, resetAfterSeconds: 120 },
+          { limit: 1, remaining: 1, resetAfterSeconds: 60 },
           clock.now(),
         );
 
@@ -773,37 +691,14 @@ describe("AdaptiveScheduler", () => {
           capacityInsufficient: false,
         });
         expect(scheduler.getSustainableFloorMs()).toBe(60_000);
-
-        const schedule = scheduler.getNetworkSchedule("network-a");
-
-        if (schedule === null) {
-          throw new Error("Expected network schedule");
-        }
-
-        expect(schedule.nextPollAt).toStrictEqual(at("12:00:30"));
-
-        clock.set("12:00:30");
-        expect(await scheduler.step()).toMatchObject({
-          kind: "idle",
-          capacityInsufficient: false,
-        });
-
-        clock.set("12:00:59");
-        expect(await scheduler.step()).toMatchObject({
-          kind: "idle",
-          capacityInsufficient: false,
-        });
-
-        clock.set("12:01:00");
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-          capacityInsufficient: false,
-        });
+        expect(
+          scheduler.getNetworkSchedule("network-a")?.nextPollAt.getTime(),
+        ).toBeGreaterThanOrEqual(at("12:01:00").getTime());
       },
       async (networkId) => ({
         kind: "success",
         networkId,
-        rateLimit: { limit: 2, remaining: 2, resetAfterSeconds: 120 },
+        rateLimit: { limit: 1, remaining: 1, resetAfterSeconds: 60 },
         payload: cityBikesResponseSchema.parse({
           network: {
             stations: [
@@ -821,7 +716,7 @@ describe("AdaptiveScheduler", () => {
     );
   });
 
-  it("lets an initialized cached schedule honor expiry safety before global pacing is established", async () => {
+  it("does not let expiry safety pull an initialized cached schedule below its sustainable floor", async () => {
     await withScheduler(
       city(["network-a"]),
       async (scheduler, store, budget, clock) => {
@@ -837,7 +732,7 @@ describe("AdaptiveScheduler", () => {
         });
         budget.reserve(clock.now());
         budget.observeRateLimit(
-          { limit: 2, remaining: 2, resetAfterSeconds: 120 },
+          { limit: 1, remaining: 1, resetAfterSeconds: 60 },
           clock.now(),
         );
 
@@ -846,39 +741,11 @@ describe("AdaptiveScheduler", () => {
           capacityInsufficient: false,
         });
         expect(scheduler.getSustainableFloorMs()).toBe(60_000);
-
-        const schedule = scheduler.getNetworkSchedule("network-a");
-
-        if (schedule === null) {
-          throw new Error("Expected initialized cached schedule");
-        }
-
-        expect(schedule.nextPollAt).toStrictEqual(at("12:00:30"));
-
-        clock.set("12:00:30");
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-          capacityInsufficient: false,
-        });
+        expect(
+          scheduler.getNetworkSchedule("network-a")?.nextPollAt.getTime(),
+        ).toBeGreaterThanOrEqual(at("12:01:00").getTime());
       },
-      async (networkId) => ({
-        kind: "success",
-        networkId,
-        rateLimit: { limit: 2, remaining: 2, resetAfterSeconds: 120 },
-        payload: cityBikesResponseSchema.parse({
-          network: {
-            stations: [
-              {
-                id: "network-a-station",
-                latitude: 1,
-                longitude: 1,
-                timestamp: "2026-08-08T12:00:30Z",
-                free_bikes: 5,
-              },
-            ],
-          },
-        }),
-      }),
+      async (networkId) => successfulFetch(networkId, "12:00:00", 5),
     );
   });
 });
