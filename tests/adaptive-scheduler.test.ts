@@ -356,80 +356,11 @@ describe("AdaptiveScheduler", () => {
     );
   });
 
-  it("backs off across same-count freshness refreshes with advancing provider timestamps", async () => {
-    const outcomes = [
-      successfulFetch("network-a", "12:00:00", 5),
-      successfulFetch("network-a", "12:00:30", 5),
-      successfulFetch("network-a", "12:01:00", 5),
-    ];
-
-    await withScheduler(
-      city(["network-a"]),
-      async (scheduler, _store, _budget, clock) => {
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-          usefulness: "freshness-refresh",
-        });
-        const firstSchedule = scheduler.getNetworkSchedule("network-a");
-        const sustainableFloorMs = scheduler.getSustainableFloorMs();
-
-        if (firstSchedule === null || sustainableFloorMs === null) {
-          throw new Error("Expected first schedule and sustainable floor");
-        }
-
-        expect(firstSchedule.intervalMs).toBe(sustainableFloorMs);
-        clock.setDate(firstSchedule.nextPollAt);
-
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-          usefulness: "freshness-refresh",
-        });
-        const secondSchedule = scheduler.getNetworkSchedule("network-a");
-
-        if (secondSchedule === null) {
-          throw new Error("Expected second schedule");
-        }
-
-        expect(secondSchedule.intervalMs).toBeGreaterThan(firstSchedule.intervalMs);
-        clock.setDate(secondSchedule.nextPollAt);
-
-        expect(await scheduler.step()).toMatchObject({
-          kind: "fetched",
-          usefulness: "freshness-refresh",
-        });
-        const thirdSchedule = scheduler.getNetworkSchedule("network-a");
-
-        if (thirdSchedule === null) {
-          throw new Error("Expected third schedule");
-        }
-
-        expect(thirdSchedule.intervalMs).toBeGreaterThan(secondSchedule.intervalMs);
-        expect(scheduler.getMetrics()).toMatchObject({
-          totalFetches: 3,
-          availabilityChanges: 0,
-          freshnessRefreshes: 3,
-          redundantFetches: 0,
-          failures: 0,
-          redundantRatio: 0,
-        });
-      },
-      async () => {
-        const outcome = outcomes.shift();
-
-        if (outcome === undefined) {
-          throw new Error("No configured fetch outcome");
-        }
-
-        return outcome;
-      },
-    );
-  });
-
   it("classifies first, redundant, freshness, and availability outcomes with adaptive intervals", async () => {
     const outcomes = [
       successfulFetch("network-a", "12:00:00", 5),
       successfulFetch("network-a", "12:00:00", 5),
-      successfulFetch("network-a", "12:01:00", 5),
+      successfulFetch("network-a", "12:02:00", 5),
       successfulFetch("network-a", "12:03:00", 8),
     ];
 

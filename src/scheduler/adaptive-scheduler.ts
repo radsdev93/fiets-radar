@@ -502,7 +502,7 @@ export class AdaptiveScheduler {
     if (usefulness === "availability-change") {
       desiredIntervalMs = Math.ceil((previousIntervalMs ?? initialIntervalMs) / 2);
     } else if (usefulness === "freshness-refresh") {
-      desiredIntervalMs = previousIntervalMs !== undefined ? previousIntervalMs * 1.25 : initialIntervalMs;
+      desiredIntervalMs = previousIntervalMs ?? initialIntervalMs;
     } else if (usefulness === "redundant") {
       desiredIntervalMs = (previousIntervalMs ?? initialIntervalMs) * 2;
     } else {
@@ -532,7 +532,7 @@ export class AdaptiveScheduler {
       return freshnessCeilingMs;
     }
 
-    const initialIntervalMs = Math.ceil(sustainableFloorMs);
+    const initialIntervalMs = Math.ceil(sustainableFloorMs * 1.5);
 
     return sustainableFloorMs > freshnessCeilingMs
       ? initialIntervalMs
