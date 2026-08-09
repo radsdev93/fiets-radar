@@ -10,13 +10,13 @@ It is updated during development rather than reconstructed at the end.
 
 - **Model & settings:** GPT-5.6 Terra, High reasoning
 - **Role:** Primary implementation assistant.
-- **Code contribution:** Roughly 99% of the committed TypeScript/Jest implementation was initially generated through Codex prompts and then reviewed before commit.
+- **Code contribution:** Roughly 99% of the final submitted TypeScript/Jest implementation was initially generated through Codex prompts and then reviewed before commit.
 
 ### ChatGPT
 
 - **Model & settings:** GPT-5.6 Sol, High reasoning
 - **Role:** External review and analysis assistant.
-- **Code contribution:** <1%. One final TypeScript instance-type annotation was corrected from `Database` to `Database.Database` after switching to the maintained `@types/better-sqlite3` declarations; implementation code otherwise came from Codex or was written/reviewed by me.
+- **Code contribution:** <1% of the final submitted TypeScript/Jest tree. One final TypeScript instance-type annotation was corrected from `Database` to `Database.Database` after switching to the maintained `@types/better-sqlite3` declarations. ChatGPT also supplied an experimental global-request-pacing prototype during benchmark tuning; that experiment was committed for measurement and later reverted after it regressed the benchmark, so it is visible in Git history but is not part of the final submitted implementation.
 - **Usage:** Used as an external second-pass analysis/review assistant for specification interpretation, documentation, captured API evidence, scheduler review, and benchmark-design review. Provider claims were checked against captured evidence before being incorporated into the repository.
 
 ## Method
@@ -387,9 +387,9 @@ This was not classified as an assistant failure because the original solution sa
 
 ---
 
-## Least-Trusted Final Area So Far
+## Least-Trusted Final Area
 
-The part I currently trust least is the **adaptive scheduler policy**, not because a specific known failing case remains, but because it is the most heuristic component and has the largest gap between deterministic unit tests and real provider behavior.
+The part I trust least is the **adaptive scheduler policy** because it is the most heuristic component and has the largest gap between deterministic unit-test correctness and control-loop quality on real provider behavior.
 
 The core safety boundaries around it are stronger:
 
@@ -397,26 +397,97 @@ The core safety boundaries around it are stronger:
 - runtime provider remaining values are authoritative;
 - malformed budget state fails closed;
 - provider snapshots retain explicit validity;
-- the scheduler is globally single-request-in-flight.
+- the scheduler is globally single-request-in-flight;
+- R5 compliance is measured rather than inferred from the target cadence.
 
-By contrast, choices such as halving cadence after availability changes, keeping cadence after freshness-only refreshes, doubling after redundancy, using a 60-second expiry margin, and deriving a sustainable per-network floor are deliberately simple heuristics.
+The final V2 benchmark made that distinction concrete.
 
-The benchmark harness now exists and reuses the real scheduler under the same explicit virtual request budget as a fixed-interval mode. A dense V2 raw trace is being captured while this revision is written.
+Against the same raw trace and virtual request budget:
 
-The evidence that will change my confidence is the final measured comparison:
+```text
+original adaptive:
+  requests             255
+  mean staleness       179.756 s
+  p95 staleness        292.352 s
+  redundant ratio      0.117647
+  R5 compliance        1.000000
+  hourly-average MAE   3.486667
 
-- total requests;
-- redundant-fetch ratio;
-- mean and p95 provider-source staleness;
-- rolling R5 compliance;
-- MAE of stored hourly averages against trace-derived ground truth.
+fixed:
+  requests             295
+  mean staleness       108.275 s
+  p95 staleness        188.385 s
+  redundant ratio      0.050847
+  R5 compliance        1.000000
+  hourly-average MAE   1.850000
+```
 
-If the adaptive policy loses materially on those measurements, I will report the loss and tune only from that recorded evidence rather than treating the passing unit tests as proof that the heuristic is good.
+The adaptive scheduler therefore saves requests and ties R5 compliance, but loses the measured staleness, redundancy, and hourly-average-error metrics.
+
+I did not tune the benchmark inputs or hide the loss.
+
+Two subsequent evidence-driven scheduler experiments used the same trace, budget, fixed baseline, and metric definitions. Both measured worse on overall quality and were reverted. The final submitted scheduler is therefore the original, simpler heuristic rather than the most recently attempted tuning.
+
+This is the main area I would continue investigating with additional independent traces if this were a production system.
+
+---
 
 ## Something Written by Hand
 
-This required entry is intentionally still open in this revision.
+After the first real V2 benchmark, the AI-assisted scheduler had passed the deterministic suite but still won only the request-count metric and lost the quality metrics.
 
-The benchmark subsystem is the strongest genuine candidate because multiple AI-assisted iterations produced plausible, type-correct implementations with incorrect experimental semantics. I will only claim a manually written piece after I have actually written that repository code myself and can explain why I stopped delegating that part.
+At that point I wrote the first benchmark-driven scheduler experiment and its focused regression test by hand rather than asking the implementation assistant to produce another heuristic.
 
-I will not relabel generated code as handwritten or invent a failure solely to fill the section.
+The change separated two ideas that the previous AI-assisted policy treated too similarly:
+
+```text
+semantic usefulness:
+  same count + newer provider freshness is useful
+
+availability volatility:
+  repeated same-count freshness is still evidence that bike availability is flat
+```
+
+The handwritten experiment therefore:
+
+- changed the initial adaptive interval from `1.5 × sustainableFloor` to the neutral sustainable floor;
+- kept the first successful observation at that neutral cadence;
+- applied a modest `1.25×` interval backoff to later same-count freshness refreshes;
+- added a focused test proving that first observation remains neutral while successive fresh-but-flat observations progressively back off and remain classified as `freshness-refresh`.
+
+I chose `1.25` as a deliberately modest, explainable factor between “no backoff” and the existing `2×` redundant-response backoff. I selected it before looking at the new benchmark result rather than searching constants after the fact.
+
+### Why I think the assistant struggled
+
+The problem was not TypeScript syntax. The difficult part was that the unit tests could verify local scheduler invariants but could not prove that the resulting feedback policy made good use of requests over real provider behavior.
+
+The AI-assisted iterations repeatedly produced locally plausible rules:
+
+```text
+change → faster
+freshness → useful
+redundant → slower
+```
+
+but the real trace exposed interactions between:
+
+- semantic usefulness and numerical volatility;
+- source freshness and unchanged bike counts;
+- the equal-share sustainable floor;
+- trace update resolution;
+- multi-resource city staleness;
+- request savings versus where those saved requests are spent.
+
+Those interactions are control-policy behavior rather than ordinary branch correctness, so they remained weakly constrained until the real replay benchmark existed.
+
+### What happened to the handwritten experiment
+
+The experiment was useful because the benchmark falsified the hypothesis.
+
+Using the same trace and budget, it reduced requests from `255` to `216` but worsened mean staleness, p95 staleness, redundant ratio, and hourly-average MAE. I therefore rejected it after measurement rather than keeping it merely because I had written it myself.
+
+A second structural global-pacing experiment was also measured and rejected.
+
+Both tuning commits were reverted, restoring the original heuristic for submission. The handwritten experiment remains visible in Git history and is documented in `docs/benchmark.md`.
+
+That result changed my confidence more than another passing unit test would have: it showed that a reasonable local policy improvement can still make the end-to-end control loop worse, and that benchmark evidence must be allowed to overrule implementation intuition.

@@ -1040,7 +1040,83 @@ Raw traces are larger than normalized traces, but they satisfy the evidence requ
 
 Round-level availability is conservative: the benchmark waits until the whole sweep is complete before making that complete round visible. This sacrifices some possible sample-level fidelity in exchange for a simple no-future-information rule.
 
-The adaptive heuristic is still judged by measurement, not intent. Final wins and losses remain pending until the running V2 capture completes and the comparison is executed.
+The adaptive heuristic is judged by measurement, not intent.
+
+### Measured result and scheduler decision
+
+The final V2 trace contains 60 complete rounds over approximately two hours for five configured
+resources across Barcelona, Madrid, and Göteborg. The fixed and adaptive strategies were replayed
+against the same trace with an explicit request budget of 300.
+
+The submitted/original adaptive heuristic produced:
+
+```text
+requests             255
+mean staleness       179.756 s
+p95 staleness        292.352 s
+redundant ratio      0.117647
+R5 compliance        1.000000
+hourly-average MAE   3.486667
+```
+
+The fixed baseline produced:
+
+```text
+requests             295
+mean staleness       108.275 s
+p95 staleness        188.385 s
+redundant ratio      0.050847
+R5 compliance        1.000000
+hourly-average MAE   1.850000
+```
+
+The adaptive policy therefore wins only on request count, ties R5 compliance, and loses the four
+measured quality metrics. I do not reinterpret or hide that result. This is an empirical result for
+this trace and these tested policies; it is not a proof that adaptive scheduling cannot outperform a
+fixed policy in general.
+
+Two evidence-driven scheduler experiments were then tested against the **same** trace, budget,
+baseline, and metric definitions:
+
+1. a freshness-backoff experiment started unknown resources at the equal-share neutral cadence and
+   applied a modest 1.25× backoff to repeated same-count freshness refreshes;
+2. a global-pacing experiment separated per-network adaptive deadlines from aggregate request
+   pacing so that changing resources could request service below the equal-share per-network floor.
+
+The first experiment used 216 requests but materially worsened staleness, redundancy, and MAE.
+The second used 246 requests and re-spent some capacity, but quality remained worse than the
+original heuristic and p95 staleness degraded further.
+
+Both experimental code changes were therefore reverted.
+
+### Cost and final choice
+
+The fixed baseline is unusually strong on this trace because its interval (`120.298` seconds) is
+close to the approximately two-minute recording cadence. Polling substantially faster than the
+trace can expose another request before newer recorded provider evidence exists, while backing off
+flat-but-fresh resources saves requests at the cost of older source timestamps.
+
+The benchmark is development evidence, not proof that the original heuristic is globally optimal
+and not proof that the requested two-win target is impossible. However, it is sufficient to reject
+the two measured regressions.
+
+The final submission therefore keeps the simpler original adaptive policy:
+
+```text
+availability change → shorten cadence
+freshness refresh   → keep roughly the current cadence
+redundant            → back off
+failure              → conservative backoff
+```
+
+and keeps the original runtime-derived sustainable per-network floor and expiry-safety pacing.
+
+The cost is explicit: the submitted adaptive scheduler does **not** meet the benchmark target of
+beating the fixed baseline on at least two metrics on this recorded workload. It saves about 13.6% of
+requests while preserving measured R5 compliance, but gives up freshness and hourly-average accuracy
+relative to the fixed baseline. `docs/benchmark.md` records the complete result and rejected
+experiments. No further constant tuning is performed against this same development trace merely to
+manufacture a favorable comparison.
 
 ---
 
@@ -1117,6 +1193,5 @@ These interpretations are stated here so the implementation does not silently re
 
 ## Remaining Open Questions
 
-- Final measured adaptive-versus-fixed benchmark result.
 - A production policy for small future provider timestamps / clock skew beyond the current
   causal-validity checks.

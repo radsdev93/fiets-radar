@@ -2,7 +2,7 @@
 
 This document describes the deterministic adaptive-versus-fixed comparison required by section 5 of the assignment.
 
-> **Status:** the final V2 raw trace has been captured successfully. The original adaptive heuristic and one evidence-driven tuning attempt have both been replayed against the **same trace and same request budget**. The original heuristic won request usage only. The first tuning attempt saved still more requests but worsened staleness, redundancy, and hourly-average error, so it is preserved below as a failed experiment rather than presented as an improvement.
+> **Status:** the final V2 raw trace has been captured successfully and the comparison is complete. The original adaptive heuristic and two evidence-driven tuning experiments were replayed against the **same trace and same request budget**. Neither tuning experiment improved the overall comparison, so both were rejected and the original adaptive heuristic was restored for the final submission. The rejected experiments remain in Git history and are documented below.
 
 ## Purpose
 
@@ -12,7 +12,7 @@ The benchmark answers one question:
 
 The adaptive strategy is not treated as better by definition. Losses are reported as losses.
 
-The first real-trace result is intentionally kept even though it does not meet the brief's target that adaptive should beat the baseline on at least two metrics. It is evidence about the original heuristic and the reason for any later policy correction.
+The first real-trace result is intentionally kept even though it does not meet the brief's target that adaptive should beat the baseline on at least two metrics. The brief also explicitly asks losses to be reported rather than hidden. This result is therefore treated as evidence about the original heuristic and the reason for any later policy correction, not as something to tune away.
 
 ## Final Trace
 
@@ -359,7 +359,7 @@ However, the cost was significant:
 
 The result therefore does **not** support a claim that the original adaptive heuristic is better overall.
 
-It wins one metric, ties one, and loses four.
+It wins one metric, ties one, and loses four. It also does **not** establish that adaptive scheduling is impossible in general; it establishes only what happened for this recorded workload, this benchmark methodology, and the policies actually measured.
 
 ## Evidence-Driven Interpretation of the Initial Loss
 
@@ -554,7 +554,7 @@ The high p95 staleness is also consistent with repeated 1.25× backoff pushing s
 
 ### Decision after Attempt 1
 
-Attempt 1 is kept as a failed experiment.
+Attempt 1 is kept as a rejected experiment whose hypothesis was falsified by measurement.
 
 The 1.25 multiplier will not be repeatedly adjusted against this trace merely to search for a winning constant.
 
@@ -563,6 +563,162 @@ The next design question is structural:
 > How should global sustainable request pacing be separated from per-network adaptive cadence so that saved capacity can be reallocated to changing resources without violating the provider budget, freshness safety, R5 coverage, or fairness?
 
 Any follow-up implementation must preserve the same trace, budget, fixed baseline, and metric definitions so that later results remain comparable.
+
+
+## Post-Tuning Attempt 2 — Global Request Pacing
+
+Attempt 1 showed that backing off flat resources saved requests but did not make those savings useful elsewhere. A second change therefore separated per-network adaptive cadence from aggregate request pacing.
+
+The scheduler retained the same adaptive outcome policy from Attempt 1:
+
+```text
+availability change
+→ shorten the network interval
+
+freshness refresh with unchanged availability
+→ modestly back off by 1.25×
+
+redundant response
+→ strong backoff
+
+failure
+→ strong backoff
+```
+
+The structural correction changed how those per-network requests were constrained:
+
+```text
+per-network schedule
+→ decides when a resource would like to be polled
+
+global sustainable pacing
+→ remaining reset-window time / remaining requests
+
+persistent RequestBudgetController
+→ remains the hard authorization boundary
+```
+
+The equal-share sustainable cadence was no longer used as a hard minimum interval for every network while capacity was sufficient. A changing resource could therefore become due sooner than the equal-share cadence, while a separate global request gate paced aggregate request consumption. Initial discovery remained prompt so that previously unseen resources could establish their first state.
+
+All unit tests, TypeScript checks, and diff checks passed before this benchmark was run.
+
+The same trace and budget were then replayed again:
+
+```bash
+npm run benchmark -- \
+  --trace traces/citybikes-benchmark-v2.json \
+  --budget 300
+```
+
+Result:
+
+| Metric | Adaptive | Fixed | Better |
+| --- | ---: | ---: | --- |
+| requests used | **246** | 295 | **Adaptive** |
+| mean staleness (s) | 317.213 | **108.275** | **Fixed** |
+| p95 staleness (s) | 796.160 | **188.385** | **Fixed** |
+| redundant fetch ratio | 0.186992 | **0.050847** | **Fixed** |
+| R5 window compliance | 1.000000 | 1.000000 | Tie |
+| hourly-average MAE (bikes) | 4.105000 | **1.850000** | **Fixed** |
+
+Additional output:
+
+| Field | Adaptive | Fixed |
+| --- | ---: | ---: |
+| staleness sample count | 717 | 723 |
+| hourly MAE sample count | 6 | 6 |
+
+The benchmark classified the comparison as:
+
+```text
+adaptive wins:
+  requests
+
+fixed wins:
+  meanStalenessSeconds
+  p95StalenessSeconds
+  redundantRatio
+  maeFreeBikes
+
+ties:
+  r5Compliance
+```
+
+### Comparison across adaptive versions
+
+| Metric | Original | Attempt 1 | Attempt 2 |
+| --- | ---: | ---: | ---: |
+| requests used | 255 | **216** | 246 |
+| mean staleness (s) | **179.756** | 317.121 | 317.213 |
+| p95 staleness (s) | **292.352** | 746.825 | 796.160 |
+| redundant fetch ratio | **0.117647** | 0.194444 | 0.186992 |
+| R5 window compliance | 1.000000 | 1.000000 | 1.000000 |
+| hourly-average MAE (bikes) | **3.486667** | 4.173333 | 4.105000 |
+| staleness sample count | 723 | 723 | 717 |
+
+Attempt 2 did re-spend some capacity that Attempt 1 had left unused: requests rose from `216` to `246`. It also modestly improved the redundant ratio and hourly-average MAE relative to Attempt 1.
+
+However, the quality result remained poor. Mean staleness was effectively unchanged from Attempt 1, p95 staleness became worse, and the adaptive run produced fewer staleness samples than either the original heuristic or the fixed baseline.
+
+The structural pacing hypothesis therefore did not solve the benchmark weakness on this trace.
+
+### Interpretation
+
+The trace itself helps explain why the measured adaptive policies trade request savings against freshness on this workload.
+
+The recorded provider evidence advances in discrete capture rounds roughly two minutes apart. The fixed baseline interval is approximately `120.298` seconds, already close to the trace resolution. Polling a changing resource substantially faster than the trace can therefore produce requests before a newer captured provider response exists, which increases semantic redundancy rather than necessarily improving measured freshness. This is a characteristic of the recorded workload, not a reason to discard the benchmark: the trace and budget were fixed before the result was known, so the measured comparison stands.
+
+At the same time, backing off resources whose bike counts are flat reduces request usage but also lets their source timestamps become older. The benchmark's staleness metrics measure source freshness, not only whether the numerical bike count changed. A flat-but-fresh resource can therefore be useful for staleness quality even when its availability count is unchanged.
+
+This creates a real trade-off on this trace:
+
+```text
+back off flat availability
+→ fewer requests
+→ older source evidence
+
+poll changing resources faster
+→ potentially more responsive
+→ but requests can occur before the next captured provider update
+→ more redundancy
+```
+
+The experiments show that simply changing multiplicative backoff or separating aggregate pacing from per-network deadlines is not enough to beat the fixed baseline on two metrics under this recorded workload. This is an empirical result, not a proof that no adaptive policy could do so.
+
+### Decision after Attempt 2
+
+No further constant tuning is justified against this same development trace.
+
+Both tuning commits were reverted after measurement, restoring the original adaptive heuristic for the final submission.
+
+The original adaptive heuristic remains the best of the measured adaptive variants on the quality metrics:
+
+- lowest mean staleness;
+- lowest p95 staleness;
+- lowest redundant ratio;
+- lowest hourly-average MAE;
+- full R5 compliance;
+- while still using fewer requests than the fixed baseline.
+
+Attempts 1 and 2 are retained as evidence-driven experiments because they demonstrate why apparently reasonable control-loop changes were rejected after measurement rather than kept for architectural appearance.
+
+For final submission, the original adaptive heuristic was restored rather than shipping either more complicated tuning that measured worse. The benchmark does **not** claim that the adaptive strategy beats the fixed baseline on two metrics. It reports the loss directly, as required by the challenge guidance.
+
+
+## Final Submitted Scheduler State
+
+The final submitted scheduler uses the original adaptive heuristic measured in the initial real-trace run:
+
+```text
+availability change → shorten cadence
+freshness refresh   → keep current cadence
+redundant            → back off
+failure              → conservative backoff
+```
+
+It also retains the original runtime-derived equal-share sustainable floor and expiry-safety pacing.
+
+The two later tuning experiments remain visible in repository history but were reverted because their measured quality was worse. The final benchmark result to associate with the submitted scheduler is therefore the **Initial Real-Trace Result — Original Adaptive Heuristic**, not either tuning attempt.
 
 ## Reproduce
 
@@ -638,6 +794,6 @@ The first tuning attempt above was produced with this same command and the same 
 - The benchmark budget is a deterministic experiment budget, not a simulation of every hourly provider reset observed during the live capture.
 - Only six comparable completed city-hour averages are available for MAE in this roughly two-hour, three-city trace.
 - The first comparison measures the original heuristic, not an optimized control algorithm.
-- The first tuning attempt is intentionally preserved even though it worsened most quality metrics.
+- The first and second tuning attempts are intentionally preserved even though neither improved the overall comparison.
 - Because tuning is evidence-driven against this same trace, the trace is now development evidence rather than a completely untouched holdout set.
 - The benchmark does not yet prove that the current scheduler reallocates saved request capacity optimally across resources; Attempt 1 provides evidence that the present per-network sustainable floor limits that behavior.

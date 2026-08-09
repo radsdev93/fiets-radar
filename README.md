@@ -4,89 +4,26 @@
 
 ## Overview
 
-`fiets-radar` is a TypeScript service that tracks free-bike availability for the fixed list of 20 cities in the assignment, persists provider-backed observations, and stores time-weighted hourly averages.
+`fiets-radar` is a TypeScript service that tracks free-bike availability for the fixed list of 20 cities required by the assignment.
 
-The implementation is deliberately split into independently testable boundaries:
+The service:
 
-- runtime validation of untrusted CityBikes responses;
-- evidence-backed network normalization;
-- causal multi-network city composition;
-- explicit-validity hourly aggregation;
-- durable SQLite persistence and request-budget state;
-- one centralized adaptive scheduler;
-- crash-safe hourly finalization;
-- raw trace recording and deterministic offline replay;
-- adaptive-versus-fixed benchmarking;
-- CLI exposure of stored hourly results.
+- validates CityBikes V2 responses at runtime;
+- normalizes provider state using provider/source timestamps rather than HTTP receipt time;
+- composes complete city observations from one or more configured network resources;
+- schedules polling centrally under the provider's runtime-reported global request budget;
+- persists normalized snapshots, city observations, budget state, and hourly results in SQLite;
+- calculates time-weighted hourly free-bike averages with explicit validity intervals;
+- survives process termination by recomputing in-flight hours from durable observations;
+- records raw real-provider traces and deterministically replays them with a virtual clock;
+- compares the adaptive scheduler against a fixed-interval baseline under the same recorded evidence and request budget.
 
-The runtime implementation is complete. The final two-hour V2 benchmark trace and comparison results are still being collected at the time of this revision.
+## Requirements
 
-## Architecture
+- Node.js 24 LTS
+- npm
 
-```text
-                         ┌──────────────────────┐
-                         │    ServiceRuntime    │
-                         │ one central tick loop│
-                         └──────────┬───────────┘
-                                    │
-                     ┌──────────────┴──────────────┐
-                     │                             │
-                     ▼                             ▼
-             Hourly finalizer              AdaptiveScheduler
-                     │                             │
-                     │                     RequestBudgetController
-                     │                             │
-                     │                       CityBikes client
-                     │                             │
-                     │                     runtime validation
-                     │                             │
-                     │                    network normalization
-                     │                             │
-                     └──────────────┬──────────────┘
-                                    ▼
-                              SQLite store
-                         snapshots / observations
-                         hourly results / budget
-                                    │
-                     ┌──────────────┴──────────────┐
-                     ▼                             ▼
-               results CLI                 trace / replay /
-                                            benchmark
-```
-
-Only one CityBikes request is allowed in flight globally. The scheduler owns request selection and timing; the request-budget controller authorizes each provider request before it is sent.
-
-## Implemented Behavior
-
-- strict TypeScript configuration with no `any`;
-- Node.js 24 LTS target;
-- Jest tests with no real network access;
-- injected/fake time for deterministic scheduling tests;
-- runtime-validated CityBikes V2 responses using Zod;
-- strict parsing of the provider's observed timestamp forms, including the `+00:00Z` form;
-- runtime parsing and consistency checks for rate-limit headers;
-- 20 required cities represented exactly and mapped reproducibly to 30 selected CityBikes resources;
-- station-only, vehicle-only, and combined network normalization;
-- bicycle/ebike inclusion and scooter exclusion based on captured provider evidence;
-- provider source timestamps kept separate from HTTP receipt time;
-- causal city composition that never uses a response before it was fetched;
-- incomplete multi-network city states never stored as official city observations;
-- Golden Vector hourly aggregation with uncovered seconds excluded;
-- `averageFreeBikes: null` when no valid data covers an hour;
-- SQLite persistence using WAL + `synchronous = FULL` for file-backed databases;
-- idempotent network/city observation writes and upserted hourly results;
-- persistent global request-budget state with reserve-before-request accounting;
-- fail-closed handling for malformed persisted budget state and unusable runtime rate metadata;
-- centralized earliest-deadline-first scheduling with deterministic tie-breaking;
-- rolling five-minute R5 interpretation with a 240-second city-observation target;
-- adaptive cadence based on availability changes, source-freshness refreshes, redundancy, and failures;
-- runtime sustainable pacing floor derived from current provider `remaining` and reset time;
-- fixed polling mode used only as the benchmark baseline;
-- raw V2 trace recording with fetch time, HTTP status, headers, and exact response body;
-- deterministic raw replay through the real CityBikes validation boundary;
-- same-budget adaptive-versus-fixed benchmark infrastructure;
-- process-level SIGKILL/restart recovery test using a real file-backed SQLite database;
-- JSON CLI for stored hourly results.
+The repository contains `.nvmrc` for the intended runtime.
 
 ## Install
 
@@ -94,13 +31,13 @@ Only one CityBikes request is allowed in flight globally. The scheduler owns req
 npm install
 ```
 
-The repository pins Node.js `24.14.1` in `.nvmrc`.
-
-## Run Tests
+## Test
 
 ```bash
 npm test -- --runInBand
 ```
+
+The test suite uses Jest, injected/fake time for deterministic scheduler and benchmark behavior, and no real provider network access in unit tests.
 
 ## Type Check
 
@@ -110,15 +47,15 @@ npx tsc --noEmit
 
 ## Run the Service
 
-Use a file-backed SQLite database:
+The service stores state in a file-backed SQLite database:
 
 ```bash
 npm run service -- --db fiets-radar.sqlite
 ```
 
-The service uses all 20 configured cities and one centralized runtime loop.
+The process runs the centralized scheduler loop and finalizes completed UTC hours.
 
-On normal `SIGINT` or `SIGTERM`, the SQLite store is closed before exit. `SIGKILL` cannot be handled by a process; crash safety instead comes from durable committed observations and deterministic recomputation after restart.
+Stop it with `Ctrl+C` / `SIGINT` or `SIGTERM`.
 
 ## Read Stored Hourly Results
 
@@ -126,33 +63,23 @@ On normal `SIGINT` or `SIGTERM`, the SQLite store is closed before exit. `SIGKIL
 npm run results -- --db fiets-radar.sqlite
 ```
 
-The command prints deterministic JSON records such as:
+Output is deterministic JSON containing:
 
-```json
-[
-  {
-    "city": "Madrid",
-    "countryCode": "ES",
-    "hourStart": "2026-08-08T12:00:00.000Z",
-    "coveredSeconds": 3600,
-    "averageFreeBikes": 5032.14,
-    "coverage": 1,
-    "partial": false
-  }
-]
+```text
+city
+countryCode
+hourStart
+coveredSeconds
+averageFreeBikes
+coverage
+partial
 ```
 
-An uncovered hour preserves:
+`averageFreeBikes` is `null` when the hour has no covered seconds; missing coverage is never converted to zero availability.
 
-```json
-"averageFreeBikes": null
-```
+## Record a Raw Provider Trace
 
-rather than reporting a measured zero.
-
-## Record a Real Benchmark Trace
-
-The final benchmark recorder supports a repeatable city subset. The current benchmark capture uses Barcelona, Madrid, and Göteborg:
+Example used for the final benchmark:
 
 ```bash
 npm run trace:record -- \
@@ -164,127 +91,187 @@ npm run trace:record -- \
   --city Göteborg
 ```
 
-The recorder stores raw evidence for every fetch:
+The recorder stores each raw HTTP response with:
 
-- capture instant;
+- fetch/capture instant;
 - HTTP status;
 - response headers;
-- exact response body.
+- exact response body text.
 
-It uses the same provider budget boundary as the service and stops rather than knowingly continuing without authorization.
+The final trace contains 60 complete rounds, five selected network resources, and 300 successful real provider requests.
 
-## Run the Comparison
-
-After a V2 trace has been recorded:
+## Replay Benchmark
 
 ```bash
 npm run benchmark -- \
   --trace traces/citybikes-benchmark-v2.json \
-  --budget <request-budget-for-the-experiment>
+  --budget 300
 ```
 
-The adaptive and fixed strategies receive the same trace, virtual time range, configured city subset, and explicit simulated request budget.
+Both strategies replay the same raw trace causally with the same virtual request budget.
 
-The benchmark reports:
+### Final submitted adaptive result
 
-- requests used;
-- mean and p95 provider-source staleness;
-- redundant-fetch ratio;
-- rolling R5 window compliance;
-- mean absolute error of stored hourly averages against trace-derived ground truth.
+| Metric | Adaptive | Fixed | Better |
+| --- | ---: | ---: | --- |
+| Requests | **255** | 295 | **Adaptive** |
+| Mean staleness | 179.756 s | **108.275 s** | **Fixed** |
+| p95 staleness | 292.352 s | **188.385 s** | **Fixed** |
+| Redundant ratio | 0.117647 | **0.050847** | **Fixed** |
+| R5 compliance | 1.000000 | 1.000000 | Tie |
+| Hourly-average MAE | 3.486667 | **1.850000** | **Fixed** |
 
-The final measured comparison and exact reproduction command belong in [`docs/benchmark.md`](./docs/benchmark.md).
+The adaptive scheduler uses **13.6% fewer requests** while maintaining full measured R5 compliance, but the fixed baseline is better on staleness, redundant ratio, and hourly-average error on this trace. This is a measured trade-off on this workload, not a claim that adaptive scheduling is impossible in general.
 
-## Important Interpretation Choices
+Two later evidence-driven tuning experiments were also measured against the same trace and budget. Both used fewer requests but degraded quality further, so they were rejected and reverted. Those rejected experiments are intentionally documented in [`docs/benchmark.md`](./docs/benchmark.md) and remain visible in Git history.
 
-### Provider freshness is not HTTP freshness
-
-`fetchedAt` records when this service received a response. It never renews the provider's source timestamps.
-
-A successfully fetched historical response can therefore be persisted as evidence while still being unusable as current state.
-
-### Multi-network cities are composed causally
-
-A network snapshot may contribute to a city at `asOf` only when:
+## Architecture
 
 ```text
-fetchedAt <= asOf
-validFrom <= asOf < validUntil
+ServiceRuntime
+    |
+    v
+AdaptiveScheduler
+    |
+    +--> RequestBudgetController
+    |        |
+    |        v
+    |     SQLite
+    |
+    v
+CityBikes HTTP client
+    |
+    v
+runtime validation
+    |
+    v
+network normalization
+    |
+    v
+durable network snapshots
+    |
+    v
+city composition
+    |
+    v
+durable city observations
+    |
+    v
+hourly finalization / aggregation
+    |
+    v
+durable hourly results
 ```
 
-Every configured component is required for an official complete city observation.
+### Provider boundary
 
-For a complete city:
+External JSON is treated as untrusted data and validated at runtime. The implementation does not use a TypeScript assertion such as `await response.json() as NetworkResponse`.
+
+### Freshness and validity
+
+Provider/source timestamps define freshness. Re-fetching old provider state does not renew validity.
+
+Normalized network snapshots retain:
 
 ```text
-observedAt = asOf
-freeBikes  = sum(component freeBikes)
-validUntil = earliest component validUntil
+oldestSourceAt
+newestSourceAt
+fetchedAt
+validFrom
+validUntil
 ```
 
-Composition never grants a fresh full 900-second window to older component data.
+For a composed city observation, every required component must be causal and provider-valid at the composition instant.
 
-### R5 uses rolling windows
+### Hourly aggregation
 
-R5 is interpreted as a rolling five-minute requirement, not clock-aligned `00/05/10/...` buckets.
+A city observation contributes only while valid. The aggregator:
 
-The scheduler targets a complete city observation every 240 seconds, leaving headroom before the 300-second threshold. A city-level observation may be materialized at `asOf` from component measurements fetched earlier only while every required component remains causally available and provider-valid at `asOf`; local recomposition never extends a component's expiry.
+- honors pre-hour observations that remain valid into the hour;
+- clips intervals at hour boundaries;
+- applies supersession by newer observations;
+- excludes uncovered seconds from the average denominator;
+- reports no average (`null`) when coverage is zero;
+- calculates coverage as `coveredSeconds / 3600`;
+- marks results partial below 75% coverage.
 
-Actual R5 compliance is measured by the benchmark rather than inferred from the target or from provider request frequency.
+### Centralized scheduler and global budget
 
-### “Nothing new” is semantic
+There is one centralized scheduler and at most one provider request in flight globally.
 
-A fetch can be:
+Before an HTTP request is sent, the request-budget controller durably reserves the request. Provider-reported post-request remaining values are then reconciled back into persistent budget state.
 
-- an availability change;
-- a source-freshness refresh;
-- redundant;
-- a failure.
+The scheduler uses earliest-deadline-first selection with stable configuration-order tie-breaking. It has no timer per city or per network.
 
-An unchanged bike count with meaningfully newer provider timestamps is useful freshness information. A later HTTP fetch carrying the same old provider state is not.
+### R5 interpretation
 
-The strict literal reading of R2 (“never spend a request on data that has not changed”) cannot be guaranteed together with R1's runtime-driven adaptation on a pull-only API: before probing, the scheduler cannot know whether a previously flat resource is still flat or has changed. The implemented resolution is to minimize, learn from, and report redundant fetches rather than claim they can be eliminated with certainty. The proof and cost are recorded in [`DECISIONS.md`](./DECISIONS.md).
+R5 is treated as a rolling five-minute requirement, not aligned `00/05/10/...` buckets.
 
-## Crash Recovery
+The scheduler targets complete city observations every 240 seconds, with a 300-second rolling overdue threshold. A city observation may be recomposed from cached network snapshots without spending a provider request when every required component remains causal and provider-valid.
 
-Hourly results are derived state. Durable city observations are the aggregation source facts.
+### R2 interpretation
 
-The service does **not** persist a mutable `weightedSumSoFar` or `coveredSecondsSoFar`. After a crash, the hour is recomputed from the observations that were durably committed before the crash plus observations written after restart.
+Fetches are classified as:
 
-The process-level recovery test:
+```text
+availability-change
+freshness-refresh
+redundant
+failure
+```
 
-1. writes and finalizes a completed hour;
-2. writes part of the next hour;
-3. sends an explicit ready signal;
-4. receives `SIGKILL`;
-5. restarts against the same SQLite file;
-6. deliberately replays one identical pre-kill observation;
-7. adds the remaining observations;
-8. finalizes the recovered hour.
+A same-count response whose provider-backed freshness advances is useful and is therefore not classified as redundant.
 
-The duplicate observation is ignored by the idempotent observation key, so the recovered aggregate neither loses nor double-counts committed coverage.
+Because CityBikes exposes no verified free push/change-notification mechanism or conditional validator for these resources, the implementation cannot know before a probe whether the remote value changed. The operational interpretation of R2 is therefore to minimize and report semantically redundant fetches rather than claim zero redundancy.
 
-## Current Limitations
+## Persistence and Crash Recovery
 
-- The 20-city network mapping is evidence-backed but static; provider fleet representations can change.
-- Some captured CityBikes resources return provider timestamps that are already stale by much more than `maxStaleness`. The service refuses to turn those responses into fresh observations.
-- Adaptive interval state is run-local and is rebuilt after restart. Durable correctness state is persisted.
-- A restart automatically finalizes the immediately preceding completed hour. A persistent finalization cursor for arbitrary multi-hour downtime is not implemented.
-- The first request needed to discover an unknown runtime budget is an unavoidable bootstrap edge. After discovery, request authorization is fail-closed.
-- The adaptive heuristic is intentionally simple and remains the least-trusted policy area until the final real-trace benchmark is complete.
-- The required specification conflict is resolved in `DECISIONS.md` as R1 versus the strict literal reading of R2. The final benchmark result is still being collected at the time of this revision.
+SQLite stores durable facts rather than a mutable in-progress weighted sum.
+
+Hourly results are deterministically recomputed from persisted city observations and upserted. The crash-recovery test starts a real child process with a real file-backed SQLite database, kills it with `SIGKILL` after a committed-state checkpoint, restarts against the same database, replays an observation idempotently, and verifies both the completed and resumed hour.
+
+A known limitation is that scheduler heuristic state itself is run-local. Durable correctness relies on persisted observations, results, snapshots, and request-budget state.
+
+## Important Specification Decisions
+
+The assignment intentionally contains conflicting and underspecified requirements. The full proofs and choices are in [`DECISIONS.md`](./DECISIONS.md).
+
+The principal conflict is R1 versus a strict literal interpretation of R2:
+
+- before making a future pull request, the client cannot distinguish a world where the provider is unchanged from one where it changed;
+- probing can therefore return unchanged data;
+- never probing would prevent runtime adaptation to a later change.
+
+The implementation preserves R1 and interprets R2 operationally as minimizing and reporting redundant fetches.
+
+A material underspecification is also documented around the meaning of observation instant `t` when a city total is composed from independently timestamped provider records and multiple HTTP responses.
+
+## Provider Findings
+
+Captured CityBikes behavior and raw-evidence conclusions are documented in:
+
+- [`docs/api-findings.md`](./docs/api-findings.md)
+- [`docs/benchmark.md`](./docs/benchmark.md)
+
+The recorded provider evidence includes runtime rate-limit headers, representation differences, stale resources, and the non-standard timestamp form ending in `+00:00Z`.
+
+## AI Usage
+
+AI usage, verification, rejected suggestions, failures, and human review are documented in [`AI-USAGE.md`](./AI-USAGE.md).
+
+The project intentionally keeps the development trail and rejected scheduler experiments visible rather than rewriting history after measurement.
+
+## Known Limitations
+
+- The benchmark trace covers three cities and roughly two hours, not every city or time-of-day pattern.
+- The benchmark target of at least two adaptive metric wins was not met on this trace: adaptive won request count, tied R5 compliance, and fixed won the four measured quality metrics.
+- Some real CityBikes resources observed during reconnaissance were already stale beyond configured validity.
+- Future provider clock-skew handling remains conservative and is not presented as fully solved.
+- A fresh service restart after a long multi-hour downtime does not reconstruct every missed historical finalization cursor; completed durable observations/results remain safe, but arbitrary downtime backfill is outside the implemented recovery claim.
 
 ## Documentation
 
-- [`DECISIONS.md`](./DECISIONS.md): specification conflicts, interpretations, architectural decisions, and costs.
-- [`AI-USAGE.md`](./AI-USAGE.md): assistant workflow, failures, rejected suggestions, and confidence assessment.
-- [`docs/api-findings.md`](./docs/api-findings.md): measured CityBikes behavior and captured evidence.
-- [`docs/benchmark.md`](./docs/benchmark.md): deterministic comparison methodology and final measured results.
-
-## What I Would Do Next With More Time
-
-- persist an hourly-finalization cursor so arbitrary multi-hour downtime can be caught up automatically;
-- add production observability for provider freshness, request-budget state, city coverage, and scheduler decisions;
-- periodically rediscover/revalidate provider representation and city mapping assumptions;
-- run longer traces across different times of day before tuning the adaptive heuristic further;
-- add a controlled operational recovery path for an unknown bootstrap budget state.
+- [`DECISIONS.md`](./DECISIONS.md) — specification conflicts, proofs, interpretations, trade-offs, and costs.
+- [`AI-USAGE.md`](./AI-USAGE.md) — AI workflow, verification, failures, and rejected suggestions.
+- [`docs/api-findings.md`](./docs/api-findings.md) — measured CityBikes API behavior.
+- [`docs/benchmark.md`](./docs/benchmark.md) — trace format, replay methodology, metrics, results, rejected tuning experiments, and reproduction instructions.
