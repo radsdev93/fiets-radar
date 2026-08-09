@@ -2,7 +2,7 @@
 
 This document describes the deterministic adaptive-versus-fixed comparison required by section 5 of the assignment.
 
-> **Status:** the final V2 raw trace has been captured successfully and the first real-trace comparison has been run. The initial adaptive heuristic wins on request usage only, ties R5 compliance, and loses the remaining measured quality metrics. That result is preserved below as pre-tuning evidence. Any scheduler correction will be replayed against the **same trace and same request budget** rather than changing the experiment after seeing the outcome.
+> **Status:** the final V2 raw trace has been captured successfully. The original adaptive heuristic and one evidence-driven tuning attempt have both been replayed against the **same trace and same request budget**. The original heuristic won request usage only. The first tuning attempt saved still more requests but worsened staleness, redundancy, and hourly-average error, so it is preserved below as a failed experiment rather than presented as an improvement.
 
 ## Purpose
 
@@ -424,22 +424,145 @@ Any scheduler correction after this point must follow these rules:
 
 This keeps the before/after comparison reproducible.
 
-## Post-Tuning Result
+## Post-Tuning Attempt 1 — Freshness Backoff
 
-**Pending.**
+After the initial real-trace loss, the adaptive policy was changed manually in two deliberately small ways:
 
-If the adaptive heuristic is changed, the result will be recorded here rather than replacing the initial run.
+```text
+unknown network
+→ start at the sustainable neutral cadence
+
+same availability + newer provider freshness
+→ keep the fetch classified as freshness-refresh
+→ modestly back off the per-network interval by 1.25×
+```
+
+The existing behavior for availability changes, redundant fetches, failures, budget safety, expiry safety, R5 materialization, and the fixed baseline was left unchanged.
+
+The intent was to separate two questions that the original heuristic partially conflated:
+
+```text
+Was this fetch semantically useful?
+How volatile does this network appear?
+```
+
+A same-count response with newer provider freshness remains useful for R2 accounting, while repeated same-count fresh responses provide evidence that availability is currently flat.
+
+The implementation and focused unit test were committed before seeing the next benchmark result. The same command was then rerun:
+
+```bash
+npm run benchmark -- \
+  --trace traces/citybikes-benchmark-v2.json \
+  --budget 300
+```
+
+Result:
 
 | Metric | Adaptive | Fixed | Better |
 | --- | ---: | ---: | --- |
-| requests used | pending | 295 | pending |
-| mean staleness (s) | pending | 108.275 | pending |
-| p95 staleness (s) | pending | 188.385 | pending |
-| redundant fetch ratio | pending | 0.050847 | pending |
-| R5 window compliance | pending | 1.000000 | pending |
-| hourly-average MAE (bikes) | pending | 1.850000 | pending |
+| requests used | **216** | 295 | **Adaptive** |
+| mean staleness (s) | 317.121 | **108.275** | **Fixed** |
+| p95 staleness (s) | 746.825 | **188.385** | **Fixed** |
+| redundant fetch ratio | 0.194444 | **0.050847** | **Fixed** |
+| R5 window compliance | 1.000000 | 1.000000 | Tie |
+| hourly-average MAE (bikes) | 4.173333 | **1.850000** | **Fixed** |
 
-The fixed values should remain identical because the trace, budget, baseline strategy, and metrics are unchanged.
+Additional output:
+
+| Field | Adaptive | Fixed |
+| --- | ---: | ---: |
+| staleness sample count | 723 | 723 |
+| hourly MAE sample count | 6 | 6 |
+
+The benchmark again classified the result as:
+
+```text
+adaptive wins:
+  requests
+
+fixed wins:
+  meanStalenessSeconds
+  p95StalenessSeconds
+  redundantRatio
+  maeFreeBikes
+
+ties:
+  r5Compliance
+```
+
+### Comparison with the original adaptive heuristic
+
+| Metric | Original adaptive | Attempt 1 | Direction |
+| --- | ---: | ---: | --- |
+| requests used | 255 | **216** | fewer requests |
+| mean staleness (s) | 179.756 | **317.121** | worse |
+| p95 staleness (s) | 292.352 | **746.825** | much worse |
+| redundant fetch ratio | 0.117647 | **0.194444** | worse |
+| R5 window compliance | 1.000000 | 1.000000 | unchanged |
+| hourly-average MAE (bikes) | 3.486667 | **4.173333** | worse |
+
+Attempt 1 reduced adaptive requests from `255` to `216`, a further reduction of `39` requests. Relative to the fixed baseline, it used `79` fewer requests:
+
+```text
+216 / 295 ≈ 73.22%
+```
+
+or about `26.78%` fewer requests.
+
+That additional saving did not translate into better allocation quality. Mean staleness, p95 staleness, redundant ratio, and hourly-average MAE all became worse.
+
+### Interpretation of Attempt 1
+
+This result rejects the simple hypothesis that stronger backing off from flat availability is sufficient.
+
+The experiment shows that the scheduler can reduce polling on resources that appear flat, but the saved capacity is not then used to observe changing resources more aggressively.
+
+The reason is structural.
+
+The current sustainable-floor calculation is:
+
+```text
+networkCount × remainingWindow / remainingBudget
+```
+
+and that value is then used as a lower bound for each individual network interval.
+
+That calculation is appropriate for an equal-share cadence: it answers approximately how slowly every network must be polled if all resources receive the same share of the global request budget.
+
+It does not answer how quickly the central scheduler may spend the next request globally.
+
+As a result, the current adaptive policy can do:
+
+```text
+flat resource
+→ poll less often
+→ spend fewer requests
+```
+
+but it cannot fully do:
+
+```text
+flat resource
+→ poll less often
+→ reuse saved global capacity
+→ poll a changing resource faster than the equal-share floor
+```
+
+The first tuning attempt therefore made the asymmetry more visible: it created more savings on flat resources, but the per-network floor prevented the scheduler from reallocating those savings effectively.
+
+The high p95 staleness is also consistent with repeated 1.25× backoff pushing some flat-resource intervals toward the freshness ceiling. For multi-resource cities, an older flat component can increase city-level source staleness even while another component is changing and observed more frequently.
+
+### Decision after Attempt 1
+
+Attempt 1 is kept as a failed experiment.
+
+The 1.25 multiplier will not be repeatedly adjusted against this trace merely to search for a winning constant.
+
+The next design question is structural:
+
+> How should global sustainable request pacing be separated from per-network adaptive cadence so that saved capacity can be reallocated to changing resources without violating the provider budget, freshness safety, R5 coverage, or fairness?
+
+Any follow-up implementation must preserve the same trace, budget, fixed baseline, and metric definitions so that later results remain comparable.
 
 ## Reproduce
 
@@ -504,7 +627,7 @@ The initial original-heuristic output is:
 }
 ```
 
-After an evidence-driven scheduler change, this same command will produce the post-tuning comparison and the result will be added above.
+The first tuning attempt above was produced with this same command and the same budget. Any later scheduler change must continue to use this exact trace, budget, fixed baseline, and metric definitions so the comparison remains reproducible.
 
 ## Known Experimental Limitations
 
@@ -515,4 +638,6 @@ After an evidence-driven scheduler change, this same command will produce the po
 - The benchmark budget is a deterministic experiment budget, not a simulation of every hourly provider reset observed during the live capture.
 - Only six comparable completed city-hour averages are available for MAE in this roughly two-hour, three-city trace.
 - The first comparison measures the original heuristic, not an optimized control algorithm.
-- If tuning is performed, it is evidence-driven against this same trace; that improves reproducibility but also means the trace becomes development evidence rather than a completely untouched holdout set.
+- The first tuning attempt is intentionally preserved even though it worsened most quality metrics.
+- Because tuning is evidence-driven against this same trace, the trace is now development evidence rather than a completely untouched holdout set.
+- The benchmark does not yet prove that the current scheduler reallocates saved request capacity optimally across resources; Attempt 1 provides evidence that the present per-network sustainable floor limits that behavior.
